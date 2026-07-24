@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+from .backfill import extract_codex_sessions, validate_backfill_bundle
 from .config import initialize_project, load_project
 from .gitops import commit_paths
 from .ids import new_id
@@ -108,6 +109,39 @@ def _parser() -> argparse.ArgumentParser:
     commands.add_parser("status", help="summarize current project state")
     lineage = commands.add_parser("lineage", help="show dependency ancestry")
     lineage.add_argument("record_id")
+    backfill = commands.add_parser("backfill", help="reconstruct historical research evidence")
+    backfill_commands = backfill.add_subparsers(dest="backfill_command", required=True)
+    codex = backfill_commands.add_parser(
+        "codex-sessions",
+        help="extract a local, reviewable evidence bundle from Codex sessions",
+    )
+    codex.add_argument(
+        "--sessions-root",
+        default=str(Path.home() / ".codex" / "sessions"),
+        help="Codex sessions directory (default: ~/.codex/sessions)",
+    )
+    codex.add_argument("--output", help="bundle output directory")
+    codex.add_argument(
+        "--active-window-seconds",
+        type=int,
+        default=300,
+        help="exclude session files modified within this many seconds",
+    )
+    backfill_validate = backfill_commands.add_parser(
+        "validate",
+        help="validate evidence, source-session, Git, and artifact identities",
+    )
+    backfill_validate.add_argument("--bundle", help="bundle directory")
+    backfill_validate.add_argument(
+        "--skip-source-digests",
+        action="store_true",
+        help="do not re-hash original Codex session files",
+    )
+    backfill_validate.add_argument(
+        "--skip-artifact-digests",
+        action="store_true",
+        help="do not re-hash local run and dataset artifacts",
+    )
     storage = commands.add_parser("storage")
     storage_commands = storage.add_subparsers(dest="storage_command", required=True)
     storage_commands.add_parser("probe", help="create and retain a unique readback probe")
@@ -123,7 +157,15 @@ def _emit(result: dict[str, Any], *, as_json: bool) -> None:
     elif "run_id" in result:
         print(f"run {result['run_id']}: {result['status']}")
     elif result.get("valid"):
-        print(f"valid: {result['records']} records")
+        if "records" in result:
+            print(f"valid: {result['records']} records")
+        else:
+            print(
+                f"valid: {result.get('sessions', 0)} sessions, "
+                f"{result.get('evidence', 0)} evidence events, "
+                f"{result.get('artifacts', 0)} artifacts, "
+                f"{result.get('drafts', 0)} drafts"
+            )
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
 
@@ -247,6 +289,22 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "status":
         return service.status()
+    if args.command == "backfill":
+        if args.backfill_command == "codex-sessions":
+            if args.active_window_seconds < 0:
+                raise ValueError("--active-window-seconds cannot be negative")
+            return extract_codex_sessions(
+                service.project,
+                sessions_root=args.sessions_root,
+                output=args.output,
+                active_window_seconds=args.active_window_seconds,
+            )
+        return validate_backfill_bundle(
+            service.project,
+            bundle=args.bundle,
+            verify_sources=not args.skip_source_digests,
+            verify_artifacts=not args.skip_artifact_digests,
+        )
     if args.command == "storage":
         return service.probe_storage()
     return service.lineage(args.record_id)

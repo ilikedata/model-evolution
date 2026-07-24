@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
+import re
 
 from .config import ProjectConfig
 from .yamlio import load_markdown, load_yaml, write_markdown, write_yaml
@@ -28,6 +29,16 @@ STATUSES = {
     "evaluation": {"completed", "failed"},
     "decision": {"accepted", "rejected", "superseded"},
 }
+PROVENANCE_KINDS = {
+    "codex_session",
+    "git",
+    "artifact",
+    "dataset_manifest",
+    "run_metrics",
+    "human_attestation",
+}
+PROVENANCE_CONFIDENCE = {"low", "medium", "high"}
+CLAIM_TYPES = {"observed", "inferred"}
 
 
 def now() -> str:
@@ -117,6 +128,7 @@ def validate_record(record: dict[str, Any], *, expected_kind: str | None = None)
         raise ValueError(f"invalid {kind} status: {record['status']}")
     if not isinstance(record["id"], str) or not record["id"]:
         raise ValueError("record id must be a non-empty string")
+    _validate_provenance(record)
     if kind == "run":
         _validate_run(record)
     elif kind == "dataset":
@@ -137,6 +149,43 @@ def _require(record: dict[str, Any], *keys: str) -> None:
     missing = [key for key in keys if key not in record]
     if missing:
         raise ValueError(f"{record['kind']} record missing: {', '.join(missing)}")
+
+
+def _validate_provenance(record: dict[str, Any]) -> None:
+    provenance = record.get("provenance")
+    if provenance is None:
+        return
+    if not isinstance(provenance, list):
+        raise ValueError("record provenance must be a list")
+    for index, source in enumerate(provenance):
+        if not isinstance(source, dict):
+            raise ValueError(f"record provenance item {index} must be a mapping")
+        missing = {"kind", "locator", "claim_type", "confidence"} - set(source)
+        if missing:
+            raise ValueError(
+                f"record provenance item {index} missing: {', '.join(sorted(missing))}"
+            )
+        if source["kind"] not in PROVENANCE_KINDS:
+            raise ValueError(
+                f"record provenance item {index} has unknown kind: {source['kind']}"
+            )
+        if not isinstance(source["locator"], str) or not source["locator"]:
+            raise ValueError(f"record provenance item {index} locator must be non-empty")
+        if source["claim_type"] not in CLAIM_TYPES:
+            raise ValueError(
+                f"record provenance item {index} claim_type must be observed or inferred"
+            )
+        if source["confidence"] not in PROVENANCE_CONFIDENCE:
+            raise ValueError(
+                f"record provenance item {index} confidence must be low, medium, or high"
+            )
+        digest = source.get("sha256")
+        if digest is not None and (
+            not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
+            raise ValueError(
+                f"record provenance item {index} sha256 must be a lowercase SHA-256 digest"
+            )
 
 
 def _validate_run(record: dict[str, Any]) -> None:
@@ -200,4 +249,53 @@ def validate_repository(project: ProjectConfig) -> dict[str, Any]:
         missing = sorted(reference for reference in references if reference not in records)
         if missing:
             raise ValueError(f"{record['id']} references missing records: {', '.join(missing)}")
+    _validate_inheritance_graph(records)
     return {"valid": True, "records": len(records), "paths": paths}
+
+
+def _validate_inheritance_graph(records: dict[str, dict[str, Any]]) -> None:
+    edges: dict[str, list[str]] = {}
+    for record_id, record in records.items():
+        dependencies: list[str] = []
+        if record.get("kind") == "run":
+            initialization = record.get("initialization", {})
+            for parent in (
+                initialization.get("parents", [])
+                if isinstance(initialization, dict)
+                else []
+            ):
+                if isinstance(parent, dict) and isinstance(parent.get("module_id"), str):
+                    module_id = parent["module_id"]
+                    if records[module_id].get("kind") != "module":
+                        raise ValueError(
+                            f"{record_id} parent is not a module record: {module_id}"
+                        )
+                    dependencies.append(module_id)
+        elif record.get("kind") == "module":
+            source_run = record.get("source_run")
+            if isinstance(source_run, str):
+                if records[source_run].get("kind") != "run":
+                    raise ValueError(
+                        f"{record_id} source_run is not a run record: {source_run}"
+                    )
+                dependencies.append(source_run)
+        edges[record_id] = dependencies
+
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(record_id: str, trail: list[str]) -> None:
+        if record_id in visiting:
+            start = trail.index(record_id)
+            cycle = trail[start:]
+            raise ValueError("module inheritance cycle: " + " -> ".join(cycle))
+        if record_id in visited:
+            return
+        visiting.add(record_id)
+        for dependency in edges.get(record_id, []):
+            visit(dependency, [*trail, dependency])
+        visiting.remove(record_id)
+        visited.add(record_id)
+
+    for record_id in edges:
+        visit(record_id, [record_id])

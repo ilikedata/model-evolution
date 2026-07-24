@@ -77,6 +77,8 @@ Use `make help` for the corresponding `research-*` targets. Examples:
 make research-validate
 make research-status
 make research-gcs-probe
+make research-backfill-codex
+make research-backfill-validate
 
 make research-dataset \
   DATASET_SLUG=metric-depth \
@@ -122,3 +124,67 @@ The dataset record connects every immutable dataset to its generator entrypoint,
 Git revision, config path and digest, seed, generated metadata digest, and GCS
 index. Run records then pin that dataset ID, closing the provenance chain from
 generator source to trained weights.
+
+## Historical Codex session backfill
+
+Historical reconstruction is deliberately separated from the canonical
+Git-tracked registry. Run:
+
+```bash
+make research-backfill-codex
+make research-backfill-validate
+```
+
+The extractor selects only sessions whose recorded working directory exactly
+matches the project root. It writes an ignored local bundle under
+`.model-evolution/work/backfill/codex/` containing:
+
+- a source and policy manifest;
+- normalized visible user/agent messages and tool interactions;
+- local run/checkpoint and dataset-manifest identities;
+- Git history and mentioned-path correlations;
+- mechanically grounded run, module, evaluation, and dataset draft candidates;
+- keyword-selected hypothesis, decision, and result review leads; and
+- a human review report.
+
+It excludes reasoning events, system/developer messages, compaction payloads,
+and recently modified sessions. Secret-shaped values are redacted, large tool
+payloads are truncated, and generic checkpoint discovery hashes `.pt` files.
+When an adapter provides a safe historical inspector, it may additionally read
+metadata using a weights-only loader; model, optimizer, RNG, and other tensor
+state is omitted from the bundle. Raw transcripts remain in the local Codex
+session store and are never copied to GCS.
+
+Validation re-hashes every bundle file, original source session, discovered
+checkpoint, metrics file, and dataset manifest. It also verifies evidence
+uniqueness, source pointers, allowed event types, redaction safety, and recorded
+Git commit availability. Replayed context copied into forked sessions remains
+available as evidence but is marked and excluded from draft correlations and
+review leads. Use `--skip-source-digests` or
+`--skip-artifact-digests` only for a fast diagnostic; reviewed backfill should
+pass the full validation.
+
+Review leads are not claims. Before creating a canonical record, reconcile its
+technical fields against Git, artifact hashes, manifests, and metrics. A
+backfilled record can preserve field-level evidence with optional provenance.
+The generated `drafts.jsonl` keeps unknown dataset, module-initialization,
+compatibility-contract, and Git fields explicitly unresolved rather than
+guessing:
+
+```yaml
+provenance:
+  - kind: codex_session
+    locator: 019...#ev-a1b2c3
+    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    claim_type: inferred
+    confidence: medium
+  - kind: run_metrics
+    locator: runs/metric-v1/metrics.jsonl
+    sha256: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+    claim_type: observed
+    confidence: high
+```
+
+Allowed provenance kinds are `codex_session`, `git`, `artifact`,
+`dataset_manifest`, `run_metrics`, and `human_attestation`. Canonical repository
+validation also rejects cyclic run/module weight inheritance.

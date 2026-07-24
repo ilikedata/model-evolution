@@ -10,7 +10,7 @@ from unittest.mock import patch
 from model_evolution.adapters.latent_arborist import ADAPTER_NAME, execute_metric_run
 from model_evolution.config import initialize_project, load_project
 from model_evolution.ids import new_id
-from model_evolution.records import load_record, validate_repository
+from model_evolution.records import load_record, validate_repository, write_record
 from model_evolution.service import ModelEvolution
 from model_evolution.storage import (
     ArtifactCollisionError,
@@ -386,6 +386,35 @@ class RegistryTests(ProjectCase):
             [{"role": "metric_encoder", "module_id": module["id"]}],
         )
         self.assertTrue(validate_repository(self.project)["valid"])
+
+    def test_validation_rejects_module_inheritance_cycle(self) -> None:
+        dataset = self.create_dataset()
+        _, experiment = self.create_experiment()
+        run = self.service.plan_run(
+            "cycle",
+            experiment_id=experiment["id"],
+            dataset_id=dataset["id"],
+            config_path=self.config_path,
+            adapter=ADAPTER_NAME,
+            parent_module_ids=[],
+        )
+        weights = self.project.work_dir / "cycle.pt"
+        weights.parent.mkdir(parents=True, exist_ok=True)
+        weights.write_bytes(b"weights")
+        module = self.service.create_module(
+            slug="cycle",
+            module_name="metric_encoder",
+            source_run=run["id"],
+            source_weights=weights,
+            contract={"architecture": "test", "version": 1},
+        )
+        run["initialization"] = {
+            "kind": "inherited",
+            "parents": [{"role": "metric_encoder", "module_id": module["id"]}],
+        }
+        write_record(self.project, "run", run, replace_existing=True)
+        with self.assertRaisesRegex(ValueError, "inheritance cycle"):
+            validate_repository(self.project)
 
 
 if __name__ == "__main__":

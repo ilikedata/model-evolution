@@ -24,3 +24,8 @@ class ProjectAdapter(Protocol):
         *,
         epochs_this_run: int | None = None,
     ) -> dict[str, Any]: ...
+
+    def inspect_historical_artifact(
+        self,
+        path: str | Path,
+    ) -> dict[str, Any] | None: ...

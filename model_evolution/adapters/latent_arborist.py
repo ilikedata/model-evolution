@@ -9,6 +9,9 @@ import sys
 import tomllib
 from typing import Any
 
+import torch
+from torch.torch_version import TorchVersion
+
 from latent_arborist.training.cache import prepare_metric_cache, validate_cache
 from latent_arborist.training.config import MetricConfig, load_metric_config
 from latent_arborist.training.engine import evaluate_checkpoint, train_metric
@@ -46,6 +49,123 @@ class LatentArboristAdapter:
         epochs_this_run: int | None = None,
     ) -> dict[str, Any]:
         return execute_metric_run(service, run_id, epochs_this_run=epochs_this_run)
+
+    def inspect_historical_artifact(
+        self,
+        path: str | Path,
+    ) -> dict[str, Any] | None:
+        return inspect_checkpoint_metadata(path)
+
+
+_CHECKPOINT_METADATA_KEYS = {
+    "batch_size",
+    "best_loss",
+    "best_relative_progress",
+    "cache_identity",
+    "checkpoint_selection",
+    "config",
+    "cuda",
+    "dataset",
+    "dataset_manifest_sha256",
+    "dataset_sha256",
+    "distilled_text_checkpoint",
+    "distilled_text_checkpoint_sha256",
+    "entropy_weight",
+    "epoch",
+    "global_step",
+    "last_metrics",
+    "latent_dim",
+    "learning_rate",
+    "loss",
+    "max_tape_length",
+    "metadata",
+    "metric_checkpoint",
+    "metric_checkpoint_sha256",
+    "metric_sha256",
+    "metrics",
+    "next_epoch",
+    "num_workers",
+    "objective",
+    "oracle_cache_dir",
+    "oracle_delta_scale",
+    "oracle_record_limit",
+    "oracle_train_tape",
+    "oracle_validate_on_train",
+    "oracle_weight_decay",
+    "overfit",
+    "prompt_space_checkpoint",
+    "prompt_space_checkpoint_sha256",
+    "prompt_space_metrics",
+    "stage",
+    "stale_epochs",
+    "student_config",
+    "supervised_checkpoint",
+    "supervised_sha256",
+    "tape_checkpoint",
+    "tape_checkpoint_sha256",
+    "tape_metrics",
+    "tape_sha256",
+    "target_iterations",
+    "teacher_dim",
+    "teacher_model",
+    "temperature",
+    "termination",
+    "text_encoder_backend",
+    "text_encoder_config",
+    "text_lr",
+    "train_pairs",
+    "tree_lr",
+    "val_pairs",
+    "vocabulary_sha256",
+    "warm_start_checkpoint",
+    "warm_start_sha256",
+}
+
+
+def _safe_checkpoint_value(value: Any, *, depth: int = 0) -> Any:
+    if depth > 8:
+        return "<maximum depth>"
+    if isinstance(value, dict):
+        return {
+            str(key): _safe_checkpoint_value(item, depth=depth + 1)
+            for key, item in value.items()
+            if str(key) in _CHECKPOINT_METADATA_KEYS or depth > 0
+            if not isinstance(item, torch.Tensor)
+        }
+    if isinstance(value, (list, tuple)):
+        if len(value) > 100:
+            return {"type": type(value).__name__, "length": len(value)}
+        return [_safe_checkpoint_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return {"type": type(value).__name__}
+
+
+def inspect_checkpoint_metadata(path: str | Path) -> dict[str, Any] | None:
+    checkpoint_path = Path(path)
+    if checkpoint_path.suffix != ".pt":
+        return None
+    try:
+        with torch.serialization.safe_globals([TorchVersion]):
+            checkpoint = torch.load(
+                checkpoint_path,
+                map_location="cpu",
+                weights_only=True,
+            )
+    except Exception as error:
+        return {
+            "inspection": "unavailable",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    if not isinstance(checkpoint, dict):
+        return {
+            "inspection": "weights_only",
+            "checkpoint_type": type(checkpoint).__name__,
+        }
+    return {
+        "inspection": "weights_only",
+        "metadata": _safe_checkpoint_value(checkpoint),
+    }
 
 
 def generate_and_register_dataset(
