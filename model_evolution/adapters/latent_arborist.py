@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -54,7 +55,12 @@ class LatentArboristAdapter:
         self,
         path: str | Path,
     ) -> dict[str, Any] | None:
-        return inspect_checkpoint_metadata(path)
+        artifact_path = Path(path)
+        if artifact_path.suffix == ".pt":
+            return inspect_checkpoint_metadata(artifact_path)
+        if artifact_path.name.startswith("events.out.tfevents."):
+            return inspect_tensorboard_metadata(artifact_path)
+        return None
 
 
 _CHECKPOINT_METADATA_KEYS = {
@@ -165,6 +171,42 @@ def inspect_checkpoint_metadata(path: str | Path) -> dict[str, Any] | None:
     return {
         "inspection": "weights_only",
         "metadata": _safe_checkpoint_value(checkpoint),
+    }
+
+
+def inspect_tensorboard_metadata(path: str | Path) -> dict[str, Any]:
+    from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
+
+    event_path = Path(path)
+    try:
+        accumulator = EventAccumulator(
+            str(event_path),
+            size_guidance={"scalars": 0},
+        )
+        accumulator.Reload()
+    except Exception as error:
+        return {
+            "inspection": "unavailable",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    scalars: dict[str, dict[str, Any]] = {}
+    for tag in accumulator.Tags().get("scalars", []):
+        values = accumulator.Scalars(tag)
+        if not values:
+            continue
+        last = values[-1]
+        scalars[str(tag)] = {
+            "points": len(values),
+            "step": int(last.step),
+            "value": float(last.value),
+            "wall_time": datetime.fromtimestamp(
+                float(last.wall_time),
+                tz=timezone.utc,
+            ).isoformat(timespec="seconds"),
+        }
+    return {
+        "inspection": "tensorboard_scalars",
+        "scalars": scalars,
     }
 
 

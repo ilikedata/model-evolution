@@ -75,6 +75,19 @@ def _digest_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _digest_file_prefix(path: Path, size: int) -> str:
+    digest = sha256()
+    remaining = size
+    with path.open("rb") as source:
+        while remaining:
+            chunk = source.read(min(1024 * 1024, remaining))
+            if not chunk:
+                raise ValueError(f"source file is shorter than its captured snapshot: {path}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return digest.hexdigest()
+
+
 def _json_text(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -236,11 +249,18 @@ def _extract_session(
     repository: Path,
     max_message_chars: int,
     max_tool_chars: int,
+    source_size: int | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]], int]:
     stat_before = path.stat()
-    payload = path.read_bytes()
+    if source_size is None:
+        payload = path.read_bytes()
+    else:
+        with path.open("rb") as source:
+            payload = source.read(source_size)
+        if len(payload) != source_size:
+            raise ValueError(f"source session is shorter than its captured snapshot: {path}")
     stat_after = path.stat()
-    if (
+    if source_size is None and (
         stat_before.st_size != stat_after.st_size
         or stat_before.st_mtime_ns != stat_after.st_mtime_ns
     ):
@@ -388,6 +408,7 @@ def _artifact_paths(project: ProjectConfig) -> Iterable[tuple[str, Path]]:
                 or path.suffix == ".pt"
                 or path.suffix in {".json", ".jsonl"}
                 or path.name.endswith(".pt.meta")
+                or path.name.startswith("events.out.tfevents.")
             ):
                 yield "run_artifact", path
     generated = project.root / "data" / "generated"
@@ -428,6 +449,10 @@ def _inventory_artifacts(project: ProjectConfig) -> list[dict[str, Any]]:
             checkpoint_metadata = inspector(path)
             if checkpoint_metadata is not None:
                 record["observed_metadata"] = checkpoint_metadata
+        elif path.name.startswith("events.out.tfevents.") and inspector is not None:
+            event_metadata = inspector(path)
+            if event_metadata is not None:
+                record["observed_metadata"] = event_metadata
         artifacts.append(record)
     return artifacts
 
@@ -538,6 +563,47 @@ def _metric_summaries(metadata: Any) -> dict[str, Any]:
     return summaries
 
 
+def _terminal_tensorboard_summary(
+    artifacts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    selected: dict[str, dict[str, Any]] = {}
+    source_paths: list[str] = []
+    for artifact in artifacts:
+        metadata = artifact.get("observed_metadata")
+        if not isinstance(metadata, dict) or metadata.get("inspection") != "tensorboard_scalars":
+            continue
+        source_paths.append(str(artifact["path"]))
+        scalars = metadata.get("scalars")
+        if not isinstance(scalars, dict):
+            continue
+        for tag, point in scalars.items():
+            if not isinstance(point, dict):
+                continue
+            existing = selected.get(str(tag))
+            identity = (str(point.get("wall_time", "")), int(point.get("step", -1)))
+            existing_identity = (
+                (str(existing.get("wall_time", "")), int(existing.get("step", -1)))
+                if existing is not None
+                else ("", -1)
+            )
+            if identity > existing_identity:
+                selected[str(tag)] = point
+    if not selected:
+        return None
+    return {
+        "last_step": max(int(point.get("step", -1)) for point in selected.values()),
+        "last_wall_time": max(str(point.get("wall_time", "")) for point in selected.values()),
+        "metrics": {
+            tag: {
+                "step": int(point["step"]),
+                "value": float(point["value"]),
+            }
+            for tag, point in sorted(selected.items())
+        },
+        "source_paths": sorted(source_paths),
+    }
+
+
 def _draft_candidates(
     project: ProjectConfig,
     *,
@@ -627,6 +693,7 @@ def _draft_candidates(
             if str(item["path"]).endswith("-report.json")
             or str(item["path"]).endswith("metrics.jsonl")
         ]
+        terminal_summary = _terminal_tensorboard_summary(run_artifacts)
         provenance = [
             {
                 "kind": "artifact",
@@ -712,6 +779,11 @@ def _draft_candidates(
                 },
                 "checkpoint_paths": [item["path"] for item in checkpoints],
                 "evaluation_paths": [item["path"] for item in reports],
+                "terminal_metrics": (
+                    {"status": "observed", **terminal_summary}
+                    if terminal_summary is not None
+                    else {"status": "unavailable"}
+                ),
                 "evidence_ids": evidence_ids,
                 "provenance": provenance,
             }
@@ -788,6 +860,35 @@ def _draft_candidates(
                             "claim_type": "observed",
                             "confidence": "high",
                         }
+                    ],
+                }
+            )
+        if terminal_summary is not None:
+            terminal_artifacts = [
+                artifact_by_path[path]
+                for path in terminal_summary["source_paths"]
+                if path in artifact_by_path
+            ]
+            drafts.append(
+                {
+                    "candidate_id": f"historical-evaluation:{run_name}:terminal-tensorboard",
+                    "kind": "evaluation_candidate",
+                    "status": "needs_review",
+                    "run_candidate": run_candidate_id,
+                    "artifact": {
+                        "paths": terminal_summary["source_paths"],
+                        "sha256": [item["sha256"] for item in terminal_artifacts],
+                    },
+                    "observed_metadata": terminal_summary,
+                    "provenance": [
+                        {
+                            "kind": "run_metrics",
+                            "locator": item["path"],
+                            "sha256": item["sha256"],
+                            "claim_type": "observed",
+                            "confidence": "high",
+                        }
+                        for item in terminal_artifacts
                     ],
                 }
             )
@@ -1270,14 +1371,16 @@ def validate_backfill_bundle(
             path = source_root / str(session["source_path"])
             if not path.is_file():
                 raise FileNotFoundError(f"source session missing: {path}")
-            if _digest_file(path) != session["source_sha256"]:
-                raise ValueError(f"source session changed: {path}")
+            captured_size = int(session["source_size"])
+            if _digest_file_prefix(path, captured_size) != session["source_sha256"]:
+                raise ValueError(f"captured source session prefix changed: {path}")
             expected_session, expected_evidence, _ = _extract_session(
                 path,
                 sessions_root=source_root,
                 repository=project.root,
                 max_message_chars=int(manifest["policy"]["max_message_chars"]),
                 max_tool_chars=int(manifest["policy"]["max_tool_chars"]),
+                source_size=captured_size,
             )
             if expected_session is None or expected_session["session_id"] != session["session_id"]:
                 raise ValueError(f"source session metadata changed: {path}")

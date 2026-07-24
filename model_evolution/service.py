@@ -62,7 +62,19 @@ class ModelEvolution:
         if self.commit:
             commit_paths(self.project.root, paths, message)
 
-    def create_hypothesis(self, slug: str, title: str, body: str) -> dict[str, Any]:
+    def create_hypothesis(
+        self,
+        slug: str,
+        title: str,
+        body: str,
+        *,
+        references: list[str] | None = None,
+    ) -> dict[str, Any]:
+        references = references or []
+        known = {str(record["id"]) for _, record in iter_records(self.project)}
+        missing = sorted(set(references) - known)
+        if missing:
+            raise ValueError("hypothesis references missing records: " + ", ".join(missing))
         record_id = new_id(slug)
         record = base_record(
             "hypothesis",
@@ -71,7 +83,7 @@ class ModelEvolution:
             git_revision=self._git_revision(),
             producer=self.actor,
         )
-        record["title"] = title
+        record.update({"title": title, "references": references})
         path = write_record(self.project, "hypothesis", record, body=f"# {title}\n\n{body}")
         self._commit([path], f"research: add hypothesis {record_id}")
         return record
@@ -465,14 +477,24 @@ class ModelEvolution:
                 ("run", "run_id"),
                 ("source_run", "source_run"),
                 ("supersedes", "supersedes"),
+                ("evaluation", "evaluation_id"),
+                ("module", "module_id"),
+                ("promotion_decision", "promotion_decision"),
             ):
                 value = record.get(field)
                 if isinstance(value, str):
                     references.append((relation, value))
             for value in record.get("hypothesis_ids", []):
                 references.append(("hypothesis", str(value)))
+            for value in record.get("module_ids", []):
+                references.append(("module", str(value)))
+            for value in record.get("references", []):
+                references.append(("evidence", str(value)))
             for parent in record.get("initialization", {}).get("parents", []):
-                references.append((str(parent.get("role", "parent")), str(parent["module_id"])))
+                if isinstance(parent, dict) and isinstance(parent.get("module_id"), str):
+                    references.append(
+                        (str(parent.get("role", "parent")), str(parent["module_id"]))
+                    )
             for relation, target in references:
                 edges.append({"from": current_id, "relation": relation, "to": target})
                 if target in all_records:

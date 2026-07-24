@@ -206,6 +206,34 @@ class RegistryTests(ProjectCase):
         self.assertIn("## Next action", text)
         self.assertTrue(validate_repository(self.project)["valid"])
 
+    def test_hypothesis_can_reference_existing_evidence_records(self) -> None:
+        source = self.service.create_hypothesis(
+            "source", "Source hypothesis", "Original claim."
+        )
+        derived = self.service.create_hypothesis(
+            "derived",
+            "Derived hypothesis",
+            "Claim derived from prior evidence.",
+            references=[source["id"]],
+        )
+        stored = load_record(self.project, "hypothesis", derived["id"])
+        self.assertEqual(stored["references"], [source["id"]])
+        self.assertTrue(self.service.validate()["valid"])
+        lineage = self.service.lineage(derived["id"])
+        self.assertEqual(
+            {record["id"] for record in lineage["records"]},
+            {source["id"], derived["id"]},
+        )
+
+    def test_hypothesis_rejects_missing_evidence_reference(self) -> None:
+        with self.assertRaisesRegex(ValueError, "hypothesis references missing"):
+            self.service.create_hypothesis(
+                "derived",
+                "Derived hypothesis",
+                "Claim.",
+                references=["missing-run"],
+            )
+
     def test_source_changes_block_run_planning(self) -> None:
         dataset = self.create_dataset()
         _, experiment = self.create_experiment()

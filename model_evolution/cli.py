@@ -9,6 +9,11 @@ from typing import Any
 from .backfill import extract_codex_sessions, validate_backfill_bundle
 from .config import initialize_project, load_project
 from .gitops import commit_paths
+from .historical_upload import (
+    build_historical_upload_plan,
+    upload_historical_plan,
+    verify_historical_upload,
+)
 from .ids import new_id
 from .service import ModelEvolution
 from .storage import upload_file
@@ -39,6 +44,12 @@ def _parser() -> argparse.ArgumentParser:
     hypothesis_create.add_argument("--title", required=True)
     hypothesis_create.add_argument("--body", default="")
     hypothesis_create.add_argument("--body-file")
+    hypothesis_create.add_argument(
+        "--reference",
+        action="append",
+        default=[],
+        help="existing canonical record used as evidence",
+    )
 
     experiment = commands.add_parser("experiment")
     experiment_commands = experiment.add_subparsers(dest="experiment_command", required=True)
@@ -142,6 +153,22 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="do not re-hash local run and dataset artifacts",
     )
+    backfill_plan = backfill_commands.add_parser(
+        "upload-plan",
+        help="package accepted historical artifacts and write a deterministic GCS plan",
+    )
+    backfill_plan.add_argument("--bundle", help="validated backfill bundle directory")
+    backfill_plan.add_argument("--output", help="upload work directory")
+    backfill_upload = backfill_commands.add_parser(
+        "upload",
+        help="execute a historical plan with create-only GCS writes",
+    )
+    backfill_upload.add_argument("--plan", help="upload plan JSON")
+    backfill_verify = backfill_commands.add_parser(
+        "upload-verify",
+        help="verify every planned historical object in GCS",
+    )
+    backfill_verify.add_argument("--plan", help="upload plan JSON")
     storage = commands.add_parser("storage")
     storage_commands = storage.add_subparsers(dest="storage_command", required=True)
     storage_commands.add_parser("probe", help="create and retain a unique readback probe")
@@ -156,6 +183,17 @@ def _emit(result: dict[str, Any], *, as_json: bool) -> None:
         print(f"{result.get('kind', 'record')} {result['id']}: {result.get('status', 'created')}")
     elif "run_id" in result:
         print(f"run {result['run_id']}: {result['status']}")
+    elif result.get("kind") == "historical_upload_plan":
+        summary = result["summary"]
+        print(
+            f"planned {result['import_id']}: {summary['logical_files']} logical files, "
+            f"{summary['gcs_objects']} GCS objects, {summary['artifact_bytes']} upload bytes"
+        )
+    elif result.get("kind") == "historical_upload_verification":
+        print(
+            f"valid {result['import_id']}: {result['objects']} GCS objects, "
+            f"{result['logical_files']} logical files"
+        )
     elif result.get("valid"):
         if "records" in result:
             print(f"valid: {result['records']} records")
@@ -208,7 +246,12 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.command == "validate":
         return service.validate()
     if args.command == "hypothesis":
-        return service.create_hypothesis(args.slug, args.title, _body(args))
+        return service.create_hypothesis(
+            args.slug,
+            args.title,
+            _body(args),
+            references=args.reference,
+        )
     if args.command == "experiment":
         return service.create_experiment(
             args.slug,
@@ -299,12 +342,25 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 output=args.output,
                 active_window_seconds=args.active_window_seconds,
             )
-        return validate_backfill_bundle(
-            service.project,
-            bundle=args.bundle,
-            verify_sources=not args.skip_source_digests,
-            verify_artifacts=not args.skip_artifact_digests,
-        )
+        if args.backfill_command == "validate":
+            return validate_backfill_bundle(
+                service.project,
+                bundle=args.bundle,
+                verify_sources=not args.skip_source_digests,
+                verify_artifacts=not args.skip_artifact_digests,
+            )
+        if args.backfill_command == "upload-plan":
+            plan = build_historical_upload_plan(
+                service.project, bundle=args.bundle, output=args.output
+            )
+            return {
+                "kind": plan["kind"],
+                "import_id": plan["import_id"],
+                "summary": plan["summary"],
+            }
+        if args.backfill_command == "upload":
+            return upload_historical_plan(service.project, plan=args.plan)
+        return verify_historical_upload(service.project, plan=args.plan)
     if args.command == "storage":
         return service.probe_storage()
     return service.lineage(args.record_id)

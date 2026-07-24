@@ -79,6 +79,9 @@ make research-status
 make research-gcs-probe
 make research-backfill-codex
 make research-backfill-validate
+make research-backfill-upload-plan
+make research-backfill-upload
+make research-backfill-upload-verify
 
 make research-dataset \
   DATASET_SLUG=metric-depth \
@@ -93,6 +96,19 @@ make research-run-plan \
 make research-run RUN_ID=<run-id>
 make research-lineage RECORD_ID=<module-or-run-id>
 ```
+
+An evidence-derived hypothesis should reference the canonical records that
+support it:
+
+```bash
+make research-hypothesis \
+  HYPOTHESIS_SLUG=source-conditioned-tape \
+  TITLE="Source-conditioned action embeddings improve tape execution" \
+  BODY_FILE=/path/to/hypothesis.md \
+  REFERENCE_IDS="<run-id> <evaluation-id> <decision-id>"
+```
+
+References are validated and become part of the repository lineage graph.
 
 Each mutation commits only its generated research records. Launches fail while
 tracked source or configuration changes are uncommitted. This guarantees that
@@ -141,7 +157,7 @@ matches the project root. It writes an ignored local bundle under
 
 - a source and policy manifest;
 - normalized visible user/agent messages and tool interactions;
-- local run/checkpoint and dataset-manifest identities;
+- local run/checkpoint, terminal TensorBoard scalar, and dataset-manifest identities;
 - Git history and mentioned-path correlations;
 - mechanically grounded run, module, evaluation, and dataset draft candidates;
 - keyword-selected hypothesis, decision, and result review leads; and
@@ -160,7 +176,11 @@ checkpoint, metrics file, and dataset manifest. It also verifies evidence
 uniqueness, source pointers, allowed event types, redaction safety, and recorded
 Git commit availability. Replayed context copied into forked sessions remains
 available as evidence but is marked and excluded from draft correlations and
-review leads. Use `--skip-source-digests` or
+review leads. Source-session validation hashes the exact captured byte prefix,
+so a continuing Codex session may append new events without invalidating
+historical evidence; changes within the captured prefix still fail validation.
+TensorBoard event files are hashed and their final scalar point per tag is
+recorded separately from best-checkpoint metrics. Use `--skip-source-digests` or
 `--skip-artifact-digests` only for a fast diagnostic; reviewed backfill should
 pass the full validation.
 
@@ -188,3 +208,31 @@ provenance:
 Allowed provenance kinds are `codex_session`, `git`, `artifact`,
 `dataset_manifest`, `run_metrics`, and `human_attestation`. Canonical repository
 validation also rejects cyclic run/module weight inheritance.
+
+### Uploading accepted historical artifacts
+
+After review and full backfill validation, the historical import has three
+explicit stages:
+
+```bash
+make research-backfill-upload-plan
+make research-backfill-upload
+make research-backfill-upload-verify
+```
+
+The plan is written under `.model-evolution/work/backfill/upload/`. It derives
+its scope from dataset and run candidates in the reviewed bundle. Raw Codex
+sessions, normalized evidence, Git-tracked research records, caches, and
+unresolved or missing artifacts are not uploaded.
+
+Datasets are packaged as deterministic `tar.zst` archives. This preserves every
+file without creating millions of tiny GCS objects. Run files remain separate,
+so checkpoints and reports can be addressed directly for module inheritance.
+The import is stored below `historical/<import-id>/`; its immutable plan and
+receipt are stored below `imports/<import-id>/`.
+
+Every write uses `if_generation_match=0`. A retry skips an existing object only
+when its byte size and SHA-256 metadata match the plan; any difference is an
+immutable collision and stops the import. Upload verification checks every
+object's generation, size, CRC32C presence, and SHA-256 metadata. There is no
+overwrite or delete path.
