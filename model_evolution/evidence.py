@@ -424,7 +424,7 @@ def _inventory_artifacts(project: ProjectConfig) -> list[dict[str, Any]]:
         from .adapters import load_adapter
 
         adapter = load_adapter(project.adapter)
-        inspector = getattr(adapter, "inspect_historical_artifact", None)
+        inspector = getattr(adapter, "inspect_artifact", None)
     except (ImportError, ValueError):
         inspector = None
     artifacts: list[dict[str, Any]] = []
@@ -460,14 +460,14 @@ def _inventory_artifacts(project: ProjectConfig) -> list[dict[str, Any]]:
 def _nearest_preceding_commit(
     commits: list[dict[str, str]], timestamp: datetime
 ) -> dict[str, str] | None:
-    candidates: list[tuple[datetime, dict[str, str]]] = []
+    matches: list[tuple[datetime, dict[str, str]]] = []
     for commit in commits:
         committed_at = _parse_timestamp(commit.get("committed_at"))
         if committed_at is not None and committed_at <= timestamp:
-            candidates.append((committed_at, commit))
-    if not candidates:
+            matches.append((committed_at, commit))
+    if not matches:
         return None
-    return max(candidates, key=lambda item: item[0])[1]
+    return max(matches, key=lambda item: item[0])[1]
 
 
 def _walk_metadata(value: Any) -> Iterable[tuple[str, Any, dict[str, Any]]]:
@@ -511,8 +511,8 @@ def _checkpoint_dependencies(
     for key, value, parent in _walk_metadata(metadata):
         if not key.endswith("_checkpoint") or not isinstance(value, str):
             continue
-        match = re.fullmatch(r"runs/([^/]+)/.+\.pt", value)
-        if not match or match.group(1) == current_run:
+        path_match = re.fullmatch(r"runs/([^/]+)/.+\.pt", value)
+        if not path_match or path_match.group(1) == current_run:
             continue
         role = key.removesuffix("_checkpoint")
         identity = (role, value)
@@ -524,9 +524,9 @@ def _checkpoint_dependencies(
             f"{key}_sha256",
             f"{role}_sha256",
         ):
-            candidate = parent.get(digest_key)
-            if isinstance(candidate, str):
-                recorded_digest = candidate
+            digest_value = parent.get(digest_key)
+            if isinstance(digest_value, str):
+                recorded_digest = digest_value
                 break
         artifact = artifact_by_path.get(value)
         observed_digest = artifact.get("sha256") if artifact else None
@@ -539,7 +539,7 @@ def _checkpoint_dependencies(
         dependencies.append(
             {
                 "role": role,
-                "module_candidate": f"historical-module:{match.group(1)}",
+                "module_observation": f"module:{path_match.group(1)}",
                 "path": value,
                 "recorded_sha256": recorded_digest,
                 "observed_sha256": observed_digest,
@@ -604,14 +604,14 @@ def _terminal_tensorboard_summary(
     }
 
 
-def _draft_candidates(
+def _entity_observations(
     project: ProjectConfig,
     *,
     artifacts: list[dict[str, Any]],
     mentions: list[dict[str, Any]],
     commits: list[dict[str, str]],
 ) -> list[dict[str, Any]]:
-    drafts: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
     artifact_by_path = {str(item["path"]): item for item in artifacts}
     dataset_by_digest: dict[str, set[str]] = {}
     for item in artifacts:
@@ -674,10 +674,10 @@ def _draft_candidates(
             artifact_by_path=artifact_by_path,
             current_run=run_name,
         )
-        dataset_candidates: set[str] = set()
+        dataset_observations: set[str] = set()
         dataset_identities = _dataset_identity_digests(checkpoint_metadata)
         for digest in dataset_identities:
-            dataset_candidates.update(dataset_by_digest.get(digest, set()))
+            dataset_observations.update(dataset_by_digest.get(digest, set()))
         unresolved_dataset_digests = sorted(
             digest for digest in dataset_identities if digest not in dataset_by_digest
         )
@@ -686,7 +686,7 @@ def _draft_candidates(
                 continue
             match = re.fullmatch(r"data/generated/([^/]+)", value.rstrip("/"))
             if match:
-                dataset_candidates.add(match.group(1))
+                dataset_observations.add(match.group(1))
         reports = [
             item
             for item in run_artifacts
@@ -713,12 +713,12 @@ def _draft_candidates(
             }
             for evidence_id in evidence_ids
         )
-        run_candidate_id = f"historical-run:{run_name}"
-        drafts.append(
+        run_observation_id = f"run:{run_name}"
+        observations.append(
             {
-                "candidate_id": run_candidate_id,
-                "kind": "run_candidate",
-                "status": "needs_review",
+                "observation_id": run_observation_id,
+                "kind": "run_observation",
+                "status": "observed",
                 "name": run_name,
                 "observed_status": "has_checkpoint" if checkpoints else "artifacts_only",
                 "first_artifact_at": min(item["modified_at"] for item in run_artifacts)
@@ -741,17 +741,17 @@ def _draft_candidates(
                 "dataset": {
                     "status": (
                         "observed"
-                        if len(dataset_candidates) == 1
+                        if len(dataset_observations) == 1
                         and not unresolved_dataset_digests
                         else "ambiguous"
-                        if dataset_candidates
-                        else "missing_historical_version"
+                        if dataset_observations
+                        else "unavailable"
                         if unresolved_dataset_digests
                         else "unresolved"
                     ),
-                    "candidates": [
-                        f"historical-dataset:{name}"
-                        for name in sorted(dataset_candidates)
+                    "matches": [
+                        f"dataset:{name}"
+                        for name in sorted(dataset_observations)
                     ],
                     "recorded_digests": sorted(dataset_identities),
                     "unresolved_digests": unresolved_dataset_digests,
@@ -773,7 +773,7 @@ def _draft_candidates(
                 },
                 "git_revision": {
                     "status": "inferred" if nearest else "unresolved",
-                    "candidate": nearest["commit"] if nearest else None,
+                    "match": nearest["commit"] if nearest else None,
                     "method": "closest commit preceding first artifact",
                     "confidence": "low" if nearest else None,
                 },
@@ -789,13 +789,13 @@ def _draft_candidates(
             }
         )
         if preferred_checkpoint is not None:
-            drafts.append(
+            observations.append(
                 {
-                    "candidate_id": f"historical-module:{run_name}",
-                    "kind": "module_candidate",
-                    "status": "needs_review",
+                    "observation_id": f"module:{run_name}",
+                    "kind": "module_observation",
+                    "status": "observed",
                     "name": run_name,
-                    "source_run_candidate": run_candidate_id,
+                    "source_run": run_observation_id,
                     "module_name": None,
                     "artifact": {
                         "path": preferred_checkpoint["path"],
@@ -815,12 +815,12 @@ def _draft_candidates(
             )
             metric_summaries = _metric_summaries(checkpoint_metadata)
             if metric_summaries and not reports:
-                drafts.append(
+                observations.append(
                     {
-                        "candidate_id": f"historical-evaluation:{run_name}:checkpoint",
-                        "kind": "evaluation_candidate",
-                        "status": "needs_review",
-                        "run_candidate": run_candidate_id,
+                        "observation_id": f"result:{run_name}:checkpoint",
+                        "kind": "result_observation",
+                        "status": "observed",
+                        "run_observation": run_observation_id,
                         "artifact": {
                             "path": preferred_checkpoint["path"],
                             "sha256": preferred_checkpoint["sha256"],
@@ -838,15 +838,15 @@ def _draft_candidates(
                     }
                 )
         for report in reports:
-            drafts.append(
+            observations.append(
                 {
-                    "candidate_id": (
-                        f"historical-evaluation:{run_name}:"
+                    "observation_id": (
+                        f"result:{run_name}:"
                         f"{Path(str(report['path'])).name}"
                     ),
-                    "kind": "evaluation_candidate",
-                    "status": "needs_review",
-                    "run_candidate": run_candidate_id,
+                    "kind": "result_observation",
+                    "status": "observed",
+                    "run_observation": run_observation_id,
                     "artifact": {
                         "path": report["path"],
                         "sha256": report["sha256"],
@@ -869,12 +869,12 @@ def _draft_candidates(
                 for path in terminal_summary["source_paths"]
                 if path in artifact_by_path
             ]
-            drafts.append(
+            observations.append(
                 {
-                    "candidate_id": f"historical-evaluation:{run_name}:terminal-tensorboard",
-                    "kind": "evaluation_candidate",
-                    "status": "needs_review",
-                    "run_candidate": run_candidate_id,
+                    "observation_id": f"result:{run_name}:terminal-tensorboard",
+                    "kind": "result_observation",
+                    "status": "observed",
+                    "run_observation": run_observation_id,
                     "artifact": {
                         "paths": terminal_summary["source_paths"],
                         "sha256": [item["sha256"] for item in terminal_artifacts],
@@ -897,11 +897,11 @@ def _draft_candidates(
         if artifact["kind"] != "dataset_manifest":
             continue
         dataset_name = Path(str(artifact["path"])).parent.name
-        drafts.append(
+        observations.append(
             {
-                "candidate_id": f"historical-dataset:{dataset_name}",
-                "kind": "dataset_candidate",
-                "status": "needs_review",
+                "observation_id": f"dataset:{dataset_name}",
+                "kind": "dataset_observation",
+                "status": "observed",
                 "name": dataset_name,
                 "manifest": {
                     "path": artifact["path"],
@@ -921,8 +921,8 @@ def _draft_candidates(
                 ],
             }
         )
-    drafts.sort(key=lambda value: (value["kind"], value["candidate_id"]))
-    return drafts
+    observations.sort(key=lambda value: (value["kind"], value["observation_id"]))
+    return observations
 
 
 def _path_mentions(evidence: list[dict[str, Any]], project: ProjectConfig) -> list[dict[str, Any]]:
@@ -1043,7 +1043,7 @@ def _review_markdown(
     artifacts: list[dict[str, Any]],
     mentions: list[dict[str, Any]],
     leads: list[dict[str, Any]],
-    drafts: list[dict[str, Any]],
+    observations: list[dict[str, Any]],
     excluded_active: list[str],
     git_commits: set[str],
 ) -> str:
@@ -1051,16 +1051,16 @@ def _review_markdown(
     replayed = sum(1 for row in evidence if row.get("replayed_context"))
     artifact_counts = Counter(str(row["kind"]) for row in artifacts)
     lead_counts = Counter(str(row["kind"]) for row in leads)
-    draft_counts = Counter(str(row["kind"]) for row in drafts)
+    observation_counts = Counter(str(row["kind"]) for row in observations)
     missing_commits = [
         session for session in sessions if session["git"]["commit"] not in git_commits
     ]
     unresolved_mentions = [mention for mention in mentions if not mention["exists"]]
     lines = [
-        "# Codex history backfill review",
+        "# Codex research evidence",
         "",
-        "This is a local, generated review workspace. It is evidence for drafting "
-        "canonical records, not canonical research history.",
+        "This local generated workspace contains normalized evidence for authoring "
+        "canonical research records.",
         "",
         "## Extraction policy",
         "",
@@ -1081,22 +1081,22 @@ def _review_markdown(
         f"- Tool calls/results: {evidence_counts['tool_call'] + evidence_counts['tool_output']}",
         f"- Run artifacts: {artifact_counts['run_artifact']}",
         f"- Dataset manifests: {artifact_counts['dataset_manifest']}",
-        f"- Run candidates: {draft_counts['run_candidate']}",
-        f"- Module candidates: {draft_counts['module_candidate']}",
-        f"- Evaluation candidates: {draft_counts['evaluation_candidate']}",
-        f"- Dataset candidates: {draft_counts['dataset_candidate']}",
+        f"- Run matches: {observation_counts['run_observation']}",
+        f"- Module matches: {observation_counts['module_observation']}",
+        f"- Evaluation matches: {observation_counts['result_observation']}",
+        f"- Dataset matches: {observation_counts['dataset_observation']}",
         f"- Path mentions: {len(mentions)} ({len(unresolved_mentions)} currently unresolved)",
         f"- Excluded active sessions: {len(excluded_active)}",
         "",
-        "## Review leads",
+        "## Research leads",
         "",
-        f"- Hypothesis leads: {lead_counts['hypothesis_lead']}",
-        f"- Decision leads: {lead_counts['decision_lead']}",
+        f"- Study leads: {lead_counts['study_lead']}",
+        f"- Direction leads: {lead_counts['direction_lead']}",
         f"- Result leads: {lead_counts['result_lead']}",
         "",
-        "Leads are keyword-selected evidence, not accepted claims. Review "
-        "`review-leads.jsonl` and reconcile each retained claim against artifacts and Git.",
-        "Mechanically grounded draft records are in `drafts.jsonl`; unresolved "
+        "Leads are keyword-selected evidence, not accepted claims. Reconcile each retained "
+        "claim against artifacts and Git. Mechanically grounded observations are in "
+        "`observations.jsonl`; unresolved "
         "dataset, initialization, contract, and Git fields remain explicit.",
         "",
         "## Session epochs",
@@ -1120,9 +1120,9 @@ def _review_markdown(
             "- Checkpoints are hashed generically; adapter metadata inspection is weights-only.",
             "- GCS existence/checksum reconciliation remains a separate, opt-in read operation.",
             "",
-            "## Graduation rule",
+            "## Materialization rule",
             "",
-            "Promote a lead into the Git registry only after its factual fields are "
+            "Materialize a lead into the Git registry only after its factual fields are "
             "corroborated. Preserve the evidence ID, session ID, source digest, "
             "confidence, and whether the claim is observed or inferred.",
             "",
@@ -1146,7 +1146,7 @@ def extract_codex_sessions(
     output_root = (
         Path(output).expanduser().resolve()
         if output is not None
-        else project.work_dir / "backfill" / "codex"
+        else project.work_dir / "evidence" / "codex"
     )
     output_root.mkdir(parents=True, exist_ok=True)
 
@@ -1187,7 +1187,7 @@ def extract_codex_sessions(
     mentions = _path_mentions(evidence, project)
     leads = _review_leads(evidence)
     commits = _git_history(project.root)
-    drafts = _draft_candidates(
+    observations = _entity_observations(
         project,
         artifacts=artifacts,
         mentions=mentions,
@@ -1198,16 +1198,16 @@ def extract_codex_sessions(
     evidence_path = output_root / "evidence.jsonl"
     artifacts_path = output_root / "artifacts.jsonl"
     mentions_path = output_root / "path-mentions.jsonl"
-    leads_path = output_root / "review-leads.jsonl"
+    leads_path = output_root / "research-leads.jsonl"
     commits_path = output_root / "git-commits.jsonl"
-    drafts_path = output_root / "drafts.jsonl"
+    observations_path = output_root / "observations.jsonl"
     digests = {
         "evidence.jsonl": _write_jsonl(evidence_path, evidence),
         "artifacts.jsonl": _write_jsonl(artifacts_path, artifacts),
         "path-mentions.jsonl": _write_jsonl(mentions_path, mentions),
-        "review-leads.jsonl": _write_jsonl(leads_path, leads),
+        "research-leads.jsonl": _write_jsonl(leads_path, leads),
         "git-commits.jsonl": _write_jsonl(commits_path, commits),
-        "drafts.jsonl": _write_jsonl(drafts_path, drafts),
+        "observations.jsonl": _write_jsonl(observations_path, observations),
     }
     review = _review_markdown(
         sessions=sessions,
@@ -1215,15 +1215,15 @@ def extract_codex_sessions(
         artifacts=artifacts,
         mentions=mentions,
         leads=leads,
-        drafts=drafts,
+        observations=observations,
         excluded_active=excluded_active,
         git_commits=git_commit_ids,
     )
-    review_path = output_root / "REVIEW.md"
+    review_path = output_root / "EVIDENCE.md"
     temporary_review = review_path.with_suffix(".md.tmp")
     temporary_review.write_text(review, encoding="utf-8")
     temporary_review.replace(review_path)
-    digests["REVIEW.md"] = _digest_bytes(review.encode("utf-8"))
+    digests["EVIDENCE.md"] = _digest_bytes(review.encode("utf-8"))
 
     source_fingerprint = _digest_bytes(
         "\n".join(
@@ -1232,7 +1232,7 @@ def extract_codex_sessions(
     )
     manifest = {
         "schema_version": BUNDLE_SCHEMA_VERSION,
-        "kind": "codex_session_backfill_bundle",
+        "kind": "codex_session_evidence_bundle",
         "generated_at": _utc_now(),
         "project": {
             "id": project.project_id,
@@ -1268,7 +1268,7 @@ def extract_codex_sessions(
             "artifacts": len(artifacts),
             "path_mentions": len(mentions),
             "review_leads": len(leads),
-            "drafts": len(drafts),
+            "observations": len(observations),
             "redactions": redactions,
         },
         "sessions": sessions,
@@ -1279,7 +1279,7 @@ def extract_codex_sessions(
     }
     write_yaml(output_root / "manifest.yaml", manifest)
     return {
-        "kind": "backfill_bundle",
+        "kind": "evidence_bundle",
         "status": "extracted",
         "path": str(output_root),
         **manifest["counts"],
@@ -1293,7 +1293,7 @@ def _assert_sha256(value: Any, context: str) -> None:
         raise ValueError(f"{context} must be a lowercase SHA-256 digest")
 
 
-def validate_backfill_bundle(
+def validate_evidence_bundle(
     project: ProjectConfig,
     *,
     bundle: str | Path | None = None,
@@ -1303,30 +1303,30 @@ def validate_backfill_bundle(
     root = (
         Path(bundle).expanduser().resolve()
         if bundle is not None
-        else project.work_dir / "backfill" / "codex"
+        else project.work_dir / "evidence" / "codex"
     )
     manifest = load_yaml(root / "manifest.yaml")
     if manifest.get("schema_version") != BUNDLE_SCHEMA_VERSION:
-        raise ValueError("unsupported backfill bundle schema")
-    if manifest.get("kind") != "codex_session_backfill_bundle":
-        raise ValueError("not a Codex session backfill bundle")
+        raise ValueError("unsupported evidence bundle schema")
+    if manifest.get("kind") != "codex_session_evidence_bundle":
+        raise ValueError("not a Codex session evidence bundle")
     if Path(str(manifest["project"]["repository"])).resolve() != project.root.resolve():
-        raise ValueError("backfill bundle belongs to a different repository")
+        raise ValueError("evidence bundle belongs to a different repository")
 
     for name, expected in manifest.get("files", {}).items():
         path = root / name
         if not path.is_file():
-            raise FileNotFoundError(f"backfill bundle file missing: {path}")
+            raise FileNotFoundError(f"evidence bundle file missing: {path}")
         _assert_sha256(expected.get("sha256"), f"{name} digest")
         observed = _digest_file(path)
         if observed != expected["sha256"]:
-            raise ValueError(f"backfill bundle file digest mismatch: {name}")
+            raise ValueError(f"evidence bundle file digest mismatch: {name}")
 
     sessions = {
         str(session["session_id"]): session for session in manifest.get("sessions", [])
     }
     if len(sessions) != len(manifest.get("sessions", [])):
-        raise ValueError("duplicate session IDs in backfill manifest")
+        raise ValueError("duplicate session IDs in evidence manifest")
     evidence_ids: set[str] = set()
     evidence_by_id: dict[str, dict[str, Any]] = {}
     evidence_count = 0
@@ -1445,62 +1445,62 @@ def validate_backfill_bundle(
     if artifact_count != manifest["counts"]["artifacts"]:
         raise ValueError("artifact count does not match manifest")
 
-    draft_ids: set[str] = set()
-    drafts: list[dict[str, Any]] = []
-    for line_number, draft in _read_jsonl(root / "drafts.jsonl"):
-        candidate_id = str(draft.get("candidate_id", ""))
-        if not candidate_id or candidate_id in draft_ids:
-            raise ValueError(f"invalid or duplicate draft ID at line {line_number}")
-        draft_ids.add(candidate_id)
-        drafts.append(draft)
-        if draft.get("status") != "needs_review":
-            raise ValueError(f"draft is not review-gated at line {line_number}")
-        for evidence_id in draft.get("evidence_ids", []):
+    observation_ids: set[str] = set()
+    observations: list[dict[str, Any]] = []
+    for line_number, observation in _read_jsonl(root / "observations.jsonl"):
+        observation_id = str(observation.get("observation_id", ""))
+        if not observation_id or observation_id in observation_ids:
+            raise ValueError(f"invalid or duplicate observation ID at line {line_number}")
+        observation_ids.add(observation_id)
+        observations.append(observation)
+        if observation.get("status") != "observed":
+            raise ValueError(f"observation is not marked observed at line {line_number}")
+        for evidence_id in observation.get("evidence_ids", []):
             if evidence_id not in evidence_ids:
                 raise ValueError(
-                    f"draft references unknown evidence at line {line_number}: {evidence_id}"
+                    f"observation references unknown evidence at line {line_number}: {evidence_id}"
                 )
-        for source in draft.get("provenance", []):
+        for source in observation.get("provenance", []):
             if not isinstance(source, dict) or not isinstance(source.get("locator"), str):
-                raise ValueError(f"invalid draft provenance at line {line_number}")
+                raise ValueError(f"invalid observation provenance at line {line_number}")
             locator = source["locator"]
             digest = source.get("sha256")
             if digest is not None:
-                _assert_sha256(digest, f"draft line {line_number} provenance digest")
+                _assert_sha256(digest, f"observation line {line_number} provenance digest")
             if source.get("kind") in {"artifact", "dataset_manifest", "run_metrics"}:
                 artifact = artifact_by_path.get(locator)
                 if artifact is None:
                     raise ValueError(
-                        f"draft references unknown artifact at line {line_number}: {locator}"
+                        f"observation references unknown artifact at line {line_number}: {locator}"
                     )
                 if digest != artifact["sha256"]:
                     raise ValueError(
-                        f"draft artifact digest disagreement at line {line_number}: {locator}"
+                        f"observation artifact digest disagreement at line {line_number}: {locator}"
                     )
-    for draft in drafts:
-        if draft["kind"] == "run_candidate":
-            for dataset_candidate in draft.get("dataset", {}).get("candidates", []):
-                if dataset_candidate not in draft_ids:
+    for observation in observations:
+        if observation["kind"] == "run_observation":
+            for dataset_observation in observation.get("dataset", {}).get("matches", []):
+                if dataset_observation not in observation_ids:
                     raise ValueError(
-                        f"{draft['candidate_id']} references unknown dataset candidate"
+                        f"{observation['observation_id']} references unknown dataset match"
                     )
-            for parent in draft.get("initialization", {}).get("parents", []):
-                if parent.get("module_candidate") not in draft_ids:
+            for parent in observation.get("initialization", {}).get("parents", []):
+                if parent.get("module_observation") not in observation_ids:
                     raise ValueError(
-                        f"{draft['candidate_id']} references unknown module candidate"
+                        f"{observation['observation_id']} references unknown module match"
                     )
-        if draft["kind"] == "module_candidate":
-            if draft.get("source_run_candidate") not in draft_ids:
+        if observation["kind"] == "module_observation":
+            if observation.get("source_run") not in observation_ids:
                 raise ValueError(
-                    f"{draft['candidate_id']} references unknown run candidate"
+                    f"{observation['observation_id']} references unknown run match"
                 )
-        if draft["kind"] == "evaluation_candidate":
-            if draft.get("run_candidate") not in draft_ids:
+        if observation["kind"] == "result_observation":
+            if observation.get("run_observation") not in observation_ids:
                 raise ValueError(
-                    f"{draft['candidate_id']} references unknown run candidate"
+                    f"{observation['observation_id']} references unknown run match"
                 )
-    if len(drafts) != manifest["counts"]["drafts"]:
-        raise ValueError("draft count does not match manifest")
+    if len(observations) != manifest["counts"]["observations"]:
+        raise ValueError("observation count does not match manifest")
 
     commits = {item["commit"] for _, item in _read_jsonl(root / "git-commits.jsonl")}
     unknown_commits = sorted(
@@ -1510,33 +1510,15 @@ def validate_backfill_bundle(
             if session["git"]["commit"] and session["git"]["commit"] not in commits
         }
     )
-    curated_references = 0
-    curated_review = project.records_dir / "BACKFILL_REVIEW.md"
-    if curated_review.is_file():
-        text = curated_review.read_text(encoding="utf-8")
-        for session_id, evidence_id in re.findall(
-            r"([0-9a-f-]{36})#(ev-[0-9a-f]{24})",
-            text,
-        ):
-            curated_references += 1
-            evidence_row = evidence_by_id.get(evidence_id)
-            if evidence_row is None:
-                raise ValueError(
-                    f"curated backfill review references unknown evidence: {evidence_id}"
-                )
-            if evidence_row["session_id"] != session_id:
-                raise ValueError(
-                    f"curated backfill review session/evidence disagreement: {evidence_id}"
-                )
     return {
         "valid": True,
-        "kind": "backfill_bundle",
+        "kind": "evidence_bundle",
         "path": str(root),
         "sessions": len(sessions),
         "evidence": evidence_count,
         "artifacts": artifact_count,
-        "drafts": len(drafts),
-        "curated_references": curated_references,
+        "observations": len(observations),
+        "curated_references": 0,
         "unknown_session_commits": unknown_commits,
         "source_fingerprint": manifest["source"]["source_fingerprint"],
     }

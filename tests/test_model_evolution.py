@@ -9,8 +9,13 @@ from unittest.mock import patch
 
 from model_evolution.adapters.latent_arborist import ADAPTER_NAME, execute_metric_run
 from model_evolution.config import initialize_project, load_project
-from model_evolution.ids import new_id
-from model_evolution.records import load_record, validate_repository, write_record
+from model_evolution.ids import new_id, observed_id
+from model_evolution.records import (
+    load_document,
+    load_record,
+    validate_repository,
+    write_record,
+)
 from model_evolution.service import ModelEvolution
 from model_evolution.storage import (
     ArtifactCollisionError,
@@ -18,6 +23,7 @@ from model_evolution.storage import (
     download_tree,
     upload_tree,
 )
+from model_evolution.yamlio import write_markdown
 
 
 def _git(root: Path, *args: str) -> None:
@@ -55,6 +61,30 @@ shard_size = 8
     )
 
 
+STUDY_BODY = """# Metric geometry
+
+## Claim
+
+The metric encoder will learn useful geometry.
+
+## Basis
+
+The generated data contains exact structural distances.
+
+## Expected evidence
+
+Held-out loss improves.
+
+## Falsification
+
+Reject if held-out loss does not improve.
+
+## Method
+
+Train one metric encoder against the pinned fixture.
+"""
+
+
 class ProjectCase(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -89,7 +119,7 @@ class ProjectCase(unittest.TestCase):
 
     def create_dataset(self) -> dict:
         source = self.root / "data" / "generated" / "fixture"
-        source.mkdir(parents=True)
+        source.mkdir(parents=True, exist_ok=True)
         (source / "dataset.json").write_text(
             json.dumps({"dataset_version": "fixture-v1"}) + "\n",
             encoding="utf-8",
@@ -103,21 +133,47 @@ class ProjectCase(unittest.TestCase):
             seed=1729,
         )
 
-    def create_experiment(self) -> tuple[dict, dict]:
-        hypothesis = self.service.create_hypothesis("metric", "Metric geometry", "Test geometry.")
-        experiment = self.service.create_experiment(
-            "metric",
-            hypothesis_ids=[hypothesis["id"]],
-            config_path=self.config_path,
-            objective="Train the metric encoder.",
+    def create_study(
+        self,
+        dataset_id: str,
+        *,
+        study_id: str = "metric-study",
+        inherited_modules: list[dict[str, str]] | None = None,
+    ) -> dict:
+        front = {
+            "status": "planned",
+            "references": [],
+            "design": {
+                "dataset_id": dataset_id,
+                "config": "configs/metric.toml",
+                "inherited_modules": inherited_modules or [],
+            },
+        }
+        write_markdown(
+            self.project.records_dir / "studies" / f"{study_id}.md",
+            front,
+            STUDY_BODY,
         )
-        return hypothesis, experiment
+        return load_record(self.project, "study", study_id)
 
 
 class IdTests(unittest.TestCase):
     def test_id_is_readable_ulid(self) -> None:
         value = new_id("Metric Depth")
         self.assertRegex(value, r"^metric-depth-[0-9A-HJKMNP-TV-Z]{26}$")
+
+    def test_observed_id_is_stable_and_source_specific(self) -> None:
+        timestamp = "2026-07-24T00:26:03Z"
+        first = observed_id("Metric Depth", timestamp, "runs/metric-depth")
+        self.assertEqual(
+            first,
+            observed_id("Metric Depth", timestamp, "runs/metric-depth"),
+        )
+        self.assertNotEqual(
+            first,
+            observed_id("Metric Depth", timestamp, "runs/other"),
+        )
+        self.assertRegex(first, r"^metric-depth-[0-9A-HJKMNP-TV-Z]{26}$")
 
 
 class StorageTests(unittest.TestCase):
@@ -140,7 +196,9 @@ class StorageTests(unittest.TestCase):
 
 
 class RegistryTests(ProjectCase):
-    def test_generated_commit_contains_only_its_record(self) -> None:
+    def test_study_identity_is_derived_from_path_and_git_commit_is_scoped(self) -> None:
+        dataset = self.create_dataset()
+        study = self.create_study(dataset["id"], study_id="path-derived")
         unrelated = self.root / "notes.txt"
         unrelated.write_text("do not commit\n", encoding="utf-8")
         service = ModelEvolution(
@@ -149,117 +207,54 @@ class RegistryTests(ProjectCase):
             actor="test-agent",
             commit=True,
         )
-        hypothesis = service.create_hypothesis("scope", "Commit scope", "Only commit this record.")
-        result = subprocess.run(
+        committed = service.commit_study(
+            self.project.records_dir / "studies" / "path-derived.md"
+        )
+        self.assertEqual(study["id"], "path-derived")
+        self.assertEqual(committed["kind"], "study")
+        shown = subprocess.run(
             ["git", "show", "--pretty=format:", "--name-only", "HEAD"],
             cwd=self.root,
             check=True,
             capture_output=True,
             text=True,
         )
-        self.assertEqual(
-            result.stdout.strip(),
-            f"model-evolution/hypotheses/{hypothesis['id']}.md",
-        )
+        self.assertEqual(shown.stdout.strip(), "model-evolution/studies/path-derived.md")
         self.assertTrue(unrelated.exists())
 
-    def test_dataset_run_lineage_and_validation(self) -> None:
+    def test_study_requires_research_sections(self) -> None:
+        write_markdown(
+            self.project.records_dir / "studies" / "incomplete.md",
+            {"status": "draft", "references": []},
+            "# Incomplete\n\n## Claim\n\nA claim.",
+        )
+        with self.assertRaisesRegex(ValueError, "missing Markdown sections"):
+            validate_repository(self.project)
+
+    def test_dataset_run_lineage_and_config_pinning(self) -> None:
         dataset = self.create_dataset()
-        hypothesis, experiment = self.create_experiment()
-        run = self.service.plan_run(
-            "metric",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[],
-        )
+        study = self.create_study(dataset["id"])
+        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
         self.assertEqual(run["initialization"], {"kind": "from_scratch", "parents": []})
-        result = validate_repository(self.project)
-        self.assertTrue(result["valid"])
+        self.assertEqual(run["config"]["path"], "configs/metric.toml")
+        self.assertEqual(len(run["config"]["sha256"]), 64)
         lineage = self.service.lineage(run["id"])
-        ids = {record["id"] for record in lineage["records"]}
-        self.assertEqual(ids, {run["id"], dataset["id"], experiment["id"], hypothesis["id"]})
-
-    def test_storage_probe_is_unique_and_retained(self) -> None:
-        first = self.service.probe_storage()
-        second = self.service.probe_storage()
-        self.assertNotEqual(first["id"], second["id"])
-        self.assertTrue(first["uri"].endswith(f"probes/{first['id']}.json"))
-        self.assertTrue((self.artifacts / "probes" / f"{first['id']}.json").exists())
-
-    def test_decision_separates_observation_inference_and_next_action(self) -> None:
-        hypothesis = self.service.create_hypothesis("metric", "Metric geometry", "Test geometry.")
-        decision = self.service.create_decision(
-            "continue-metric",
-            title="Continue metric training",
-            observations=["Validation loss improved.", "Embeddings remained non-collapsed."],
-            inference="The representation is learning useful geometry.",
-            confidence="medium",
-            next_action="Run the held-out evaluation.",
-            references=[hypothesis["id"]],
-        )
-        path = self.project.records_dir / "decisions" / f"{decision['id']}.md"
-        text = path.read_text(encoding="utf-8")
-        self.assertIn("## Observations", text)
-        self.assertIn("## Inference", text)
-        self.assertIn("## Next action", text)
-        self.assertTrue(validate_repository(self.project)["valid"])
-
-    def test_hypothesis_can_reference_existing_evidence_records(self) -> None:
-        source = self.service.create_hypothesis(
-            "source", "Source hypothesis", "Original claim."
-        )
-        derived = self.service.create_hypothesis(
-            "derived",
-            "Derived hypothesis",
-            "Claim derived from prior evidence.",
-            references=[source["id"]],
-        )
-        stored = load_record(self.project, "hypothesis", derived["id"])
-        self.assertEqual(stored["references"], [source["id"]])
-        self.assertTrue(self.service.validate()["valid"])
-        lineage = self.service.lineage(derived["id"])
         self.assertEqual(
             {record["id"] for record in lineage["records"]},
-            {source["id"], derived["id"]},
+            {run["id"], dataset["id"], study["id"]},
         )
-
-    def test_hypothesis_rejects_missing_evidence_reference(self) -> None:
-        with self.assertRaisesRegex(ValueError, "hypothesis references missing"):
-            self.service.create_hypothesis(
-                "derived",
-                "Derived hypothesis",
-                "Claim.",
-                references=["missing-run"],
-            )
 
     def test_source_changes_block_run_planning(self) -> None:
         dataset = self.create_dataset()
-        _, experiment = self.create_experiment()
-        tracked = self.root / "README.md"
-        tracked.write_text("changed\n", encoding="utf-8")
+        study = self.create_study(dataset["id"])
+        (self.root / "README.md").write_text("changed\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "must be committed"):
-            self.service.plan_run(
-                "blocked",
-                experiment_id=experiment["id"],
-                dataset_id=dataset["id"],
-                config_path=self.config_path,
-                adapter=ADAPTER_NAME,
-                parent_module_ids=[],
-            )
+            self.service.plan_run("blocked", study_id=study["id"], adapter=ADAPTER_NAME)
 
-    def test_metric_adapter_records_complete_vertical_slice(self) -> None:
+    def test_metric_adapter_embeds_results_and_publishes_available_module(self) -> None:
         dataset = self.create_dataset()
-        _, experiment = self.create_experiment()
-        run = self.service.plan_run(
-            "metric",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[],
-        )
+        study = self.create_study(dataset["id"])
+        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
 
         def fake_train(config, **kwargs):
             del kwargs
@@ -277,8 +272,7 @@ class RegistryTests(ProjectCase):
                 "quality_gate": {"passed": True},
             }
             Path(checkpoint).parent.joinpath("test-report.json").write_text(
-                json.dumps(report) + "\n",
-                encoding="utf-8",
+                json.dumps(report) + "\n", encoding="utf-8"
             )
             return report
 
@@ -299,27 +293,18 @@ class RegistryTests(ProjectCase):
         ):
             result = execute_metric_run(self.service, run["id"])
 
-        self.assertEqual(result["status"], "completed")
         completed = load_record(self.project, "run", run["id"])
-        self.assertEqual(completed["status"], "completed")
-        evaluation = load_record(self.project, "evaluation", result["evaluation_id"])
         module = load_record(self.project, "module", result["module_id"])
-        self.assertEqual(evaluation["run_id"], run["id"])
-        self.assertEqual(module["status"], "candidate")
-        self.assertEqual(module["source_run"], run["id"])
+        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["results"]["primary"]["split"], "test")
+        self.assertEqual(completed["module_ids"], [module["id"]])
+        self.assertEqual(module["status"], "available")
         self.assertTrue(validate_repository(self.project)["valid"])
 
     def test_failed_run_records_error_and_surviving_artifacts(self) -> None:
         dataset = self.create_dataset()
-        _, experiment = self.create_experiment()
-        run = self.service.plan_run(
-            "metric-failure",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[],
-        )
+        study = self.create_study(dataset["id"])
+        run = self.service.plan_run("failure", study_id=study["id"], adapter=ADAPTER_NAME)
 
         def failing_train(config, **kwargs):
             del kwargs
@@ -345,18 +330,12 @@ class RegistryTests(ProjectCase):
         self.assertEqual(failed["status"], "failed")
         self.assertEqual(failed["error"]["type"], "RuntimeError")
         self.assertTrue(failed["artifact"]["incomplete"])
-        self.assertIsNone(failed["artifact_error"])
 
-    def test_promotion_is_backed_by_decision_note(self) -> None:
+    def test_available_module_can_be_inherited_and_deprecated_module_cannot(self) -> None:
         dataset = self.create_dataset()
-        _, experiment = self.create_experiment()
-        run = self.service.plan_run(
-            "metric",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[],
+        first_study = self.create_study(dataset["id"], study_id="first")
+        source_run = self.service.plan_run(
+            "source", study_id=first_study["id"], adapter=ADAPTER_NAME
         )
         weights = self.project.work_dir / "weights.pt"
         weights.parent.mkdir(parents=True, exist_ok=True)
@@ -364,68 +343,57 @@ class RegistryTests(ProjectCase):
         module = self.service.create_module(
             slug="metric",
             module_name="metric_encoder",
-            source_run=run["id"],
+            source_run=source_run["id"],
             source_weights=weights,
             contract={"architecture": "test", "version": 1},
         )
-        with self.assertRaisesRegex(ValueError, "not promoted"):
+        inherited_study = self.create_study(
+            dataset["id"],
+            study_id="inherited",
+            inherited_modules=[{"role": "metric_encoder", "module_id": module["id"]}],
+        )
+        inherited = self.service.plan_run(
+            "inherited", study_id=inherited_study["id"], adapter=ADAPTER_NAME
+        )
+        self.assertEqual(inherited["initialization"]["parents"][0]["module_id"], module["id"])
+        self.assertEqual(
+            inherited["initialization"]["parents"][0]["sha256"],
+            module["artifact"]["sha256"],
+        )
+
+        stored, body = load_document(self.project, "module", module["id"])
+        stored["status"] = "deprecated"
+        write_record(
+            self.project,
+            "module",
+            stored,
+            body=body,
+            replace_existing=True,
+        )
+        with self.assertRaisesRegex(ValueError, "not available"):
             self.service.plan_run(
-                "metric-candidate",
-                experiment_id=experiment["id"],
-                dataset_id=dataset["id"],
-                config_path=self.config_path,
-                adapter=ADAPTER_NAME,
-                parent_module_ids=[module["id"]],
+                "blocked", study_id=inherited_study["id"], adapter=ADAPTER_NAME
             )
-        report = self.project.work_dir / "report.json"
-        report.write_text("{}\n", encoding="utf-8")
-        artifact = {"uri": "file:///report", "sha256": "0", "path": "report"}
-        evaluation = self.service.create_evaluation(
+
+    def test_later_assessment_is_independent(self) -> None:
+        dataset = self.create_dataset()
+        study = self.create_study(dataset["id"])
+        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
+        assessment = self.service.create_assessment(
             run_id=run["id"],
             dataset_id=dataset["id"],
-            metrics={"quality_gate": {"passed": True}},
-            artifact=artifact,
-            split="test",
+            evaluator={"name": "benchmark", "version": "2"},
+            metrics={"accuracy": 0.8},
+            artifact={"uri": "file:///report", "sha256": "a" * 64},
+            purpose="Evaluate against a later protocol.",
         )
-        promoted = self.service.promote_module(
-            module["id"],
-            evaluation_id=evaluation["id"],
-            rationale="The quality gate passed.",
-            approval_context="Human explicitly requested promotion in the current conversation.",
-        )
-        self.assertEqual(promoted["module"]["status"], "promoted")
-        decision_path = (
-            self.project.records_dir
-            / "decisions"
-            / f"{promoted['decision']['id']}.md"
-        )
-        self.assertIn("The quality gate passed.", decision_path.read_text(encoding="utf-8"))
-        inherited = self.service.plan_run(
-            "metric-inherited",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[module["id"]],
-        )
-        self.assertEqual(inherited["initialization"]["kind"], "inherited")
-        self.assertEqual(
-            inherited["initialization"]["parents"],
-            [{"role": "metric_encoder", "module_id": module["id"]}],
-        )
+        self.assertEqual(load_record(self.project, "assessment", assessment["id"])["run_id"], run["id"])
         self.assertTrue(validate_repository(self.project)["valid"])
 
     def test_validation_rejects_module_inheritance_cycle(self) -> None:
         dataset = self.create_dataset()
-        _, experiment = self.create_experiment()
-        run = self.service.plan_run(
-            "cycle",
-            experiment_id=experiment["id"],
-            dataset_id=dataset["id"],
-            config_path=self.config_path,
-            adapter=ADAPTER_NAME,
-            parent_module_ids=[],
-        )
+        study = self.create_study(dataset["id"])
+        run = self.service.plan_run("cycle", study_id=study["id"], adapter=ADAPTER_NAME)
         weights = self.project.work_dir / "cycle.pt"
         weights.parent.mkdir(parents=True, exist_ok=True)
         weights.write_bytes(b"weights")
@@ -438,10 +406,68 @@ class RegistryTests(ProjectCase):
         )
         run["initialization"] = {
             "kind": "inherited",
-            "parents": [{"role": "metric_encoder", "module_id": module["id"]}],
+            "parents": [
+                {
+                    "role": "metric_encoder",
+                    "module_id": module["id"],
+                    "sha256": module["artifact"]["sha256"],
+                }
+            ],
         }
-        write_record(self.project, "run", run, replace_existing=True)
+        _, body = load_document(self.project, "run", run["id"])
+        write_record(self.project, "run", run, body=body, replace_existing=True)
         with self.assertRaisesRegex(ValueError, "inheritance cycle"):
+            validate_repository(self.project)
+
+    def test_validation_rejects_inheritance_hash_drift(self) -> None:
+        dataset = self.create_dataset()
+        study = self.create_study(dataset["id"])
+        source_run = self.service.plan_run(
+            "source", study_id=study["id"], adapter=ADAPTER_NAME
+        )
+        weights = self.project.work_dir / "hash-drift.pt"
+        weights.parent.mkdir(parents=True, exist_ok=True)
+        weights.write_bytes(b"weights")
+        module = self.service.create_module(
+            slug="hash-drift",
+            module_name="metric_encoder",
+            source_run=source_run["id"],
+            source_weights=weights,
+            contract={"architecture": "test", "version": 1},
+        )
+        inherited_study = self.create_study(
+            dataset["id"],
+            study_id="hash-drift",
+            inherited_modules=[{"module_id": module["id"]}],
+        )
+        inherited = self.service.plan_run(
+            "hash-drift", study_id=inherited_study["id"], adapter=ADAPTER_NAME
+        )
+        inherited["initialization"]["parents"][0]["sha256"] = "f" * 64
+        _, body = load_document(self.project, "run", inherited["id"])
+        write_record(
+            self.project,
+            "run",
+            inherited,
+            body=body,
+            replace_existing=True,
+        )
+        with self.assertRaisesRegex(ValueError, "parent hash does not match"):
+            validate_repository(self.project)
+
+    def test_validation_rejects_wrong_reference_kind(self) -> None:
+        dataset = self.create_dataset()
+        self.create_study(dataset["id"], study_id="wrong-kind")
+        front, body = load_document(self.project, "study", "wrong-kind")
+        front["design"]["dataset_id"] = "wrong-kind"
+        write_record(
+            self.project,
+            "study",
+            front,
+            body=body,
+            replace_existing=True,
+        )
+        with self.assertRaisesRegex(ValueError, "must reference a dataset"):
             validate_repository(self.project)
 
 

@@ -19,9 +19,8 @@ from latent_arborist.training.engine import evaluate_checkpoint, train_metric
 from latent_arborist.training.tensor import vocabulary_checksum
 
 from ..gitops import require_clean_source, require_committed_file
-from ..ids import new_id
-from ..records import load_record, now, record_path
-from ..service import ModelEvolution
+from ..records import load_record, record_path
+from ..service import ModelEvolution, now
 from ..storage import download_tree, upload_file, upload_tree
 
 ADAPTER_NAME = "latent-arborist.metric"
@@ -51,7 +50,7 @@ class LatentArboristAdapter:
     ) -> dict[str, Any]:
         return execute_metric_run(service, run_id, epochs_this_run=epochs_this_run)
 
-    def inspect_historical_artifact(
+    def inspect_artifact(
         self,
         path: str | Path,
     ) -> dict[str, Any] | None:
@@ -343,19 +342,10 @@ def execute_metric_run(
         evaluation_result = evaluate_checkpoint(run_dir / "best.pt", split="test")
         run_artifact = upload_tree(service.store, run_dir, f"runs/{run_id}")
 
-        evaluation_id = new_id(f"{run_id}-test")
-        evaluation_artifact = upload_file(
+        result_artifact = upload_file(
             service.store,
             run_dir / "test-report.json",
-            f"evaluations/{evaluation_id}/report.json",
-        )
-        evaluation = service.create_evaluation(
-            run_id=run_id,
-            dataset_id=str(dataset["id"]),
-            metrics=evaluation_result,
-            artifact=evaluation_artifact,
-            split="test",
-            evaluation_id=evaluation_id,
+            f"runs/{run_id}/primary-result.json",
         )
         module = service.create_module(
             slug=f"{MODULE_NAME}-{run_id}",
@@ -368,16 +358,39 @@ def execute_metric_run(
         service.update_run(
             completed,
             status="completed",
+            body=(
+                f"# {run_id}\n\n"
+                "## Execution plan\n\nExecuted the pinned study design.\n\n"
+                "## Execution notes\n\nTraining and the primary test evaluation completed "
+                "successfully.\n\n"
+                "## Observations\n\nSee the primary structured results and immutable "
+                "report.\n\n"
+                "## Anomalies\n\nNone recorded."
+            ),
             training_result=training_result,
-            artifact={**run_artifact, "prefix": f"runs/{run_id}"},
-            evaluation_id=evaluation["id"],
+            artifacts={
+                "run": {**run_artifact, "prefix": f"runs/{run_id}"},
+                "primary_result": result_artifact,
+            },
+            results={
+                "primary": {
+                    "dataset_id": str(dataset["id"]),
+                    "split": "test",
+                    "evaluator": {
+                        "adapter": ADAPTER_NAME,
+                        "source_revision": run["source_revision"],
+                    },
+                    "metrics": evaluation_result,
+                    "artifact": result_artifact,
+                },
+                "training": training_result,
+            },
             module_ids=[module["id"]],
             ended_at=now(),
         )
         return {
             "run_id": run_id,
             "status": "completed",
-            "evaluation_id": evaluation["id"],
             "module_id": module["id"],
         }
     except KeyboardInterrupt as error:

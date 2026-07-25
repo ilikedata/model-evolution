@@ -27,7 +27,7 @@ def load_project(start: str | Path = ".") -> ProjectConfig:
         path = root / ".model-evolution" / "project.yaml"
         if path.exists():
             raw = load_yaml(path)
-            if raw.get("schema_version") != 1:
+            if raw.get("schema_version") != 2:
                 raise ValueError(f"unsupported project schema in {path}")
             store = str(raw["artifact_store"]).rstrip("/")
             parsed = urlparse(store)
@@ -58,7 +58,7 @@ def initialize_project(
     write_yaml(
         config_path,
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "project_id": project_id,
             "artifact_store": artifact_store.rstrip("/"),
             "adapter": adapter,
@@ -68,30 +68,28 @@ def initialize_project(
     )
     records_root = root_path / "model-evolution"
     for directory in (
-        "hypotheses",
-        "decisions",
-        "experiments",
+        "studies",
         "datasets",
         "runs",
         "modules",
-        "evaluations",
+        "assessments",
     ):
         (records_root / directory).mkdir(parents=True, exist_ok=True)
     readme = records_root / "README.md"
     state = records_root / "PROJECT_STATE.md"
     readme.write_text(
         f"# {project_id} research registry\n\n"
-        "Git-tracked hypotheses, experiments, datasets, runs, evaluations, modules, "
-        "and decisions managed by Model Evolution.\n",
+        "Git-tracked studies, datasets, runs, modules, and assessments managed "
+        "by Model Evolution.\n",
         encoding="utf-8",
     )
     state.write_text(
         "# Project state\n\n"
         "## Current recommendation\n\nNone recorded.\n\n"
-        "## Active hypotheses\n\nNone recorded.\n\n"
-        "## Candidate and promoted modules\n\nNone recorded.\n\n"
+        "## Active studies\n\nNone recorded.\n\n"
+        "## Available modules\n\nNone recorded.\n\n"
         "## Known failures\n\nNone recorded.\n\n"
-        "## Next actions\n\nRecord the first hypothesis and experiment.\n",
+        "## Next actions\n\nRecord the first study.\n",
         encoding="utf-8",
     )
     return load_project(root_path)

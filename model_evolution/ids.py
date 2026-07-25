@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import re
 import time
+from datetime import datetime
+from hashlib import sha256
 
 _ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
@@ -31,3 +33,17 @@ def ulid() -> str:
 
 def new_id(slug: str) -> str:
     return f"{slugify(slug)}-{ulid()}"
+
+
+def observed_id(slug: str, observed_at: str, source_identity: str) -> str:
+    """Return a stable ULID-shaped ID anchored to an observed timestamp."""
+    timestamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    timestamp_ms = int(timestamp.timestamp() * 1000)
+    randomness = int.from_bytes(
+        sha256(f"{slugify(slug)}:{observed_at}:{source_identity}".encode()).digest()[:10],
+        "big",
+    )
+    return (
+        f"{slugify(slug)}-"
+        f"{_encode(timestamp_ms, 10)}{_encode(randomness, 16)}"
+    )

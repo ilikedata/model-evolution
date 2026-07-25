@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from hashlib import sha256
 import getpass
 import json
@@ -19,8 +20,8 @@ from .ids import new_id
 from .records import (
     base_record,
     iter_records,
+    load_document,
     load_record,
-    now,
     record_path,
     validate_repository,
     write_record,
@@ -28,10 +29,13 @@ from .records import (
 from .storage import ArtifactStore, create_json, open_store, upload_file, upload_tree
 
 
+def now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def _file_reference(root: Path, path: str | Path) -> dict[str, Any]:
     relative = require_tracked_file(root, path)
-    source = root / relative
-    payload = source.read_bytes()
+    payload = (root / relative).read_bytes()
     return {"path": str(relative), "sha256": sha256(payload).hexdigest()}
 
 
@@ -62,109 +66,31 @@ class ModelEvolution:
         if self.commit:
             commit_paths(self.project.root, paths, message)
 
-    def create_hypothesis(
-        self,
-        slug: str,
-        title: str,
-        body: str,
-        *,
-        references: list[str] | None = None,
-    ) -> dict[str, Any]:
-        references = references or []
-        known = {str(record["id"]) for _, record in iter_records(self.project)}
-        missing = sorted(set(references) - known)
-        if missing:
-            raise ValueError("hypothesis references missing records: " + ", ".join(missing))
-        record_id = new_id(slug)
-        record = base_record(
-            "hypothesis",
-            record_id,
-            status="active",
-            git_revision=self._git_revision(),
-            producer=self.actor,
+    def commit_study(self, path: str | Path, *, concluded: bool = False) -> dict[str, Any]:
+        source = Path(path)
+        if not source.is_absolute():
+            source = self.project.root / source
+        source = source.resolve()
+        studies = (self.project.records_dir / "studies").resolve()
+        if source.parent != studies or source.suffix != ".md":
+            raise ValueError("study must be a Markdown file directly under model-evolution/studies")
+        study, _ = load_document(self.project, "study", source.stem)
+        expected = "concluded" if concluded else "planned"
+        if study["status"] != expected:
+            raise ValueError(f"study status must be {expected}: {study['id']}")
+        if not concluded:
+            design = study["design"]
+            require_tracked_file(self.project.root, str(design["config"]))
+        validate_repository(self.project)
+        self._commit(
+            [source],
+            (
+                f"research: conclude study {study['id']}"
+                if concluded
+                else f"research: plan study {study['id']}"
+            ),
         )
-        record.update({"title": title, "references": references})
-        path = write_record(self.project, "hypothesis", record, body=f"# {title}\n\n{body}")
-        self._commit([path], f"research: add hypothesis {record_id}")
-        return record
-
-    def create_experiment(
-        self,
-        slug: str,
-        *,
-        hypothesis_ids: list[str],
-        config_path: str | Path,
-        objective: str,
-    ) -> dict[str, Any]:
-        for hypothesis_id in hypothesis_ids:
-            load_record(self.project, "hypothesis", hypothesis_id)
-            if self.commit:
-                require_committed_file(
-                    self.project.root,
-                    record_path(self.project, "hypothesis", hypothesis_id),
-                )
-        record_id = new_id(slug)
-        record = base_record(
-            "experiment",
-            record_id,
-            status="planned",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
-        record.update(
-            {
-                "objective": objective,
-                "hypothesis_ids": hypothesis_ids,
-                "config": _file_reference(self.project.root, config_path),
-            }
-        )
-        path = write_record(self.project, "experiment", record)
-        self._commit([path], f"research: plan experiment {record_id}")
-        return record
-
-    def create_decision(
-        self,
-        slug: str,
-        *,
-        title: str,
-        observations: list[str],
-        inference: str,
-        confidence: str,
-        next_action: str,
-        references: list[str],
-    ) -> dict[str, Any]:
-        if confidence not in {"low", "medium", "high"}:
-            raise ValueError("decision confidence must be low, medium, or high")
-        known = {str(record["id"]) for _, record in iter_records(self.project)}
-        missing = sorted(set(references) - known)
-        if missing:
-            raise ValueError("decision references missing records: " + ", ".join(missing))
-        record_id = new_id(slug)
-        record = base_record(
-            "decision",
-            record_id,
-            status="accepted",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
-        record.update(
-            {
-                "title": title,
-                "decision": "research_direction",
-                "confidence": confidence,
-                "references": references,
-            }
-        )
-        facts = "\n".join(f"- {observation}" for observation in observations)
-        body = (
-            f"# {title}\n\n"
-            f"## Observations\n\n{facts}\n\n"
-            f"## Inference\n\n{inference}\n\n"
-            f"## Next action\n\n{next_action}"
-        )
-        path = write_record(self.project, "decision", record, body=body)
-        self._commit([path], f"research: record decision {record_id}")
-        return record
+        return study
 
     def register_dataset(
         self,
@@ -184,13 +110,7 @@ class ModelEvolution:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         prefix = f"datasets/{record_id}"
         artifact = upload_tree(self.store, source_path, prefix)
-        record = base_record(
-            "dataset",
-            record_id,
-            status="registered",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
+        record = base_record("dataset", record_id, status="registered")
         record.update(
             {
                 "artifact": {**artifact, "prefix": prefix},
@@ -198,13 +118,19 @@ class ModelEvolution:
                     "entrypoint": generator,
                     "config": _file_reference(self.project.root, generator_config),
                     "seed": seed,
-                    "source_git_revision": self._git_revision(),
+                    "source_revision": self._git_revision(),
                     "dataset_metadata_sha256": sha256(metadata_path.read_bytes()).hexdigest(),
                     "dataset_version": metadata.get("dataset_version"),
                 },
             }
         )
-        path = write_record(self.project, "dataset", record)
+        body = (
+            f"# {slug}\n\n"
+            "## Purpose\n\nGenerated dataset registered for immutable reuse.\n\n"
+            "## Generation notes\n\nSee the pinned generator configuration in front matter.\n\n"
+            "## Limitations\n\nNone recorded."
+        )
+        path = write_record(self.project, "dataset", record, body=body)
         self._commit([path], f"research: register dataset {record_id}")
         return record
 
@@ -212,57 +138,73 @@ class ModelEvolution:
         self,
         slug: str,
         *,
-        experiment_id: str,
-        dataset_id: str,
-        config_path: str | Path,
+        study_id: str,
         adapter: str,
-        parent_module_ids: list[str],
     ) -> dict[str, Any]:
         require_clean_source(self.project.root)
-        load_record(self.project, "experiment", experiment_id)
+        study = load_record(self.project, "study", study_id)
+        if study["status"] not in {"planned", "active"}:
+            raise ValueError(f"study must be planned or active: {study_id}")
+        if self.commit:
+            require_committed_file(self.project.root, record_path(self.project, "study", study_id))
+        design = study["design"]
+        if not isinstance(design, dict):
+            raise ValueError("study design must be a mapping")
+        dataset_id = str(design.get("dataset_id", ""))
+        config_path = design.get("config")
+        if not dataset_id or not config_path:
+            raise ValueError("study design must specify dataset_id and config")
         load_record(self.project, "dataset", dataset_id)
         if self.commit:
             require_committed_file(
-                self.project.root,
-                record_path(self.project, "experiment", experiment_id),
-            )
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "dataset", dataset_id),
+                self.project.root, record_path(self.project, "dataset", dataset_id)
             )
         parents: list[dict[str, str]] = []
-        for module_id in parent_module_ids:
+        for declared in design.get("inherited_modules", []):
+            if not isinstance(declared, dict):
+                raise ValueError("inherited_modules items must be mappings")
+            module_id = str(declared.get("module_id", ""))
             module = load_record(self.project, "module", module_id)
-            if module["status"] != "promoted":
-                raise ValueError(f"module is not promoted for reuse: {module_id}")
+            if module["status"] != "available":
+                raise ValueError(f"module is not available for reuse: {module_id}")
             if self.commit:
                 require_committed_file(
-                    self.project.root,
-                    record_path(self.project, "module", module_id),
+                    self.project.root, record_path(self.project, "module", module_id)
                 )
-            parents.append({"role": str(module["module_name"]), "module_id": module_id})
+            parents.append(
+                {
+                    "role": str(declared.get("role") or module["module_name"]),
+                    "module_id": module_id,
+                    "sha256": str(module["artifact"]["sha256"]),
+                }
+            )
         record_id = new_id(slug)
-        record = base_record(
-            "run",
-            record_id,
-            status="planned",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
+        record = base_record("run", record_id, status="planned")
         record.update(
             {
-                "experiment_id": experiment_id,
+                "study_id": study_id,
                 "dataset_id": dataset_id,
                 "adapter": adapter,
-                "config": _file_reference(self.project.root, config_path),
+                "config": _file_reference(self.project.root, str(config_path)),
+                "source_revision": self._git_revision(),
                 "initialization": {
                     "kind": "inherited" if parents else "from_scratch",
                     "parents": parents,
                 },
-                "artifacts": [],
             }
         )
-        path = write_record(self.project, "run", record)
+        baseline = design.get("baseline_run_id")
+        if baseline:
+            load_record(self.project, "run", str(baseline))
+            record["baseline_run_id"] = str(baseline)
+        body = (
+            f"# {slug}\n\n"
+            "## Execution plan\n\nExecute the pinned study design.\n\n"
+            "## Execution notes\n\nPending.\n\n"
+            "## Observations\n\nPending.\n\n"
+            "## Anomalies\n\nNone recorded."
+        )
+        path = write_record(self.project, "run", record, body=body)
         self._commit([path], f"research: plan run {record_id}")
         return record
 
@@ -274,63 +216,67 @@ class ModelEvolution:
             self.store,
             f"claims/{run_id}.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "run_id": run_id,
                 "agent": self.actor,
                 "claimed_at": now(),
-                "git_revision": self._git_revision(),
+                "source_revision": run["source_revision"],
             },
         )
 
-    def update_run(self, run: dict[str, Any], *, status: str, **updates: Any) -> Path:
-        run = dict(run)
-        run["status"] = status
-        run["updated_at"] = now()
-        run.update(updates)
-        path = write_record(self.project, "run", run, replace_existing=True)
-        self._commit([path], f"research: mark run {run['id']} {status}")
+    def update_run(
+        self,
+        run: dict[str, Any],
+        *,
+        status: str,
+        body: str | None = None,
+        **updates: Any,
+    ) -> Path:
+        current, current_body = load_document(self.project, "run", str(run["id"]))
+        value = dict(current)
+        value["status"] = status
+        value.update(updates)
+        path = write_record(
+            self.project,
+            "run",
+            value,
+            body=body or current_body,
+            replace_existing=True,
+        )
+        self._commit([path], f"research: mark run {value['id']} {status}")
         return path
 
-    def create_evaluation(
+    def create_assessment(
         self,
         *,
+        assessment_id: str | None = None,
         run_id: str,
         dataset_id: str,
+        evaluator: dict[str, Any],
         metrics: dict[str, Any],
         artifact: dict[str, Any],
-        split: str,
-        evaluation_id: str | None = None,
+        purpose: str,
     ) -> dict[str, Any]:
         load_record(self.project, "run", run_id)
         load_record(self.project, "dataset", dataset_id)
-        if self.commit:
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "run", run_id),
-            )
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "dataset", dataset_id),
-            )
-        record_id = evaluation_id or new_id(f"{run_id}-evaluation")
-        record = base_record(
-            "evaluation",
-            record_id,
-            status="completed",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
+        record_id = assessment_id or new_id(f"{run_id}-assessment")
+        record = base_record("assessment", record_id, status="completed")
         record.update(
             {
                 "run_id": run_id,
                 "dataset_id": dataset_id,
-                "split": split,
+                "evaluator": evaluator,
                 "metrics": metrics,
                 "artifact": artifact,
             }
         )
-        path = write_record(self.project, "evaluation", record)
-        self._commit([path], f"research: record evaluation {record_id}")
+        body = (
+            f"# Assessment of {run_id}\n\n"
+            f"## Purpose\n\n{purpose}\n\n"
+            "## Observations\n\nSee the structured metrics and immutable report."
+        )
+        path = write_record(self.project, "assessment", record, body=body)
+        self._commit([path], f"research: assess run {run_id}")
         return record
 
     def create_module(
@@ -343,11 +289,6 @@ class ModelEvolution:
         contract: dict[str, Any],
     ) -> dict[str, Any]:
         load_record(self.project, "run", source_run)
-        if self.commit:
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "run", source_run),
-            )
         record_id = new_id(slug)
         artifact = upload_file(
             self.store,
@@ -358,7 +299,7 @@ class ModelEvolution:
             self.store,
             f"modules/{module_name}/{record_id}/manifest.json",
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "module_id": record_id,
                 "module_name": module_name,
                 "source_run": source_run,
@@ -366,13 +307,7 @@ class ModelEvolution:
                 "weights": artifact,
             },
         )
-        record = base_record(
-            "module",
-            record_id,
-            status="candidate",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
+        record = base_record("module", record_id, status="available")
         record.update(
             {
                 "module_name": module_name,
@@ -381,70 +316,15 @@ class ModelEvolution:
                 "contract": contract,
             }
         )
-        path = write_record(self.project, "module", record)
-        self._commit([path], f"research: publish candidate module {record_id}")
+        body = (
+            f"# {module_name}\n\n"
+            "## Intended use\n\nReusable output of the source training run.\n\n"
+            "## Training evidence\n\nSee the source run's embedded primary results.\n\n"
+            "## Limitations\n\nNone recorded."
+        )
+        path = write_record(self.project, "module", record, body=body)
+        self._commit([path], f"research: publish module {record_id}")
         return record
-
-    def promote_module(
-        self,
-        module_id: str,
-        *,
-        evaluation_id: str,
-        rationale: str,
-        approval_context: str,
-    ) -> dict[str, Any]:
-        module = load_record(self.project, "module", module_id)
-        if module["status"] != "candidate":
-            raise ValueError(f"only candidate modules may be promoted: {module_id}")
-        evaluation = load_record(self.project, "evaluation", evaluation_id)
-        if self.commit:
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "module", module_id),
-            )
-            require_committed_file(
-                self.project.root,
-                record_path(self.project, "evaluation", evaluation_id),
-            )
-        if evaluation["run_id"] != module["source_run"]:
-            raise ValueError("evaluation does not belong to the candidate source run")
-        decision_id = new_id(f"promote-{module_id}")
-        decision = base_record(
-            "decision",
-            decision_id,
-            status="accepted",
-            git_revision=self._git_revision(),
-            producer=self.actor,
-        )
-        decision.update(
-            {
-                "decision": "promote_module",
-                "module_id": module_id,
-                "evaluation_id": evaluation_id,
-                "approval_context": approval_context,
-            }
-        )
-        decision_path = write_record(
-            self.project,
-            "decision",
-            decision,
-            body=f"# Promote {module_id}\n\n{rationale}",
-        )
-        module = dict(module)
-        module["status"] = "promoted"
-        module["updated_at"] = now()
-        module["promotion_decision"] = decision_id
-        module_path = write_record(
-            self.project,
-            "module",
-            module,
-            replace_existing=True,
-        )
-        self._commit(
-            [decision_path, module_path],
-            f"research: promote module {module_id}",
-        )
-        return {"module": module, "decision": decision}
 
     def status(self) -> dict[str, Any]:
         counts: dict[str, dict[str, int]] = {}
@@ -454,7 +334,7 @@ class ModelEvolution:
             status = str(record["status"])
             counts.setdefault(kind, {})
             counts[kind][status] = counts[kind].get(status, 0) + 1
-            if status in {"active", "planned", "running", "candidate", "promoted"}:
+            if status in {"draft", "planned", "active", "running", "available"}:
                 active.append({"id": str(record["id"]), "kind": kind, "status": status})
         return {"project_id": self.project.project_id, "counts": counts, "active": active}
 
@@ -470,32 +350,44 @@ class ModelEvolution:
                 return
             visited.add(current_id)
             record = all_records[current_id]
-            references: list[tuple[str, str]] = []
+            refs: list[tuple[str, str]] = []
             for relation, field in (
-                ("experiment", "experiment_id"),
+                ("study", "study_id"),
                 ("dataset", "dataset_id"),
                 ("run", "run_id"),
                 ("source_run", "source_run"),
-                ("supersedes", "supersedes"),
-                ("evaluation", "evaluation_id"),
-                ("module", "module_id"),
-                ("promotion_decision", "promotion_decision"),
+                ("baseline", "baseline_run_id"),
             ):
                 value = record.get(field)
                 if isinstance(value, str):
-                    references.append((relation, value))
-            for value in record.get("hypothesis_ids", []):
-                references.append(("hypothesis", str(value)))
-            for value in record.get("module_ids", []):
-                references.append(("module", str(value)))
-            for value in record.get("references", []):
-                references.append(("evidence", str(value)))
-            for parent in record.get("initialization", {}).get("parents", []):
-                if isinstance(parent, dict) and isinstance(parent.get("module_id"), str):
-                    references.append(
-                        (str(parent.get("role", "parent")), str(parent["module_id"]))
-                    )
-            for relation, target in references:
+                    refs.append((relation, value))
+            refs.extend(("evidence", str(value)) for value in record.get("references", []))
+            refs.extend(("module", str(value)) for value in record.get("module_ids", []))
+            conclusion = record.get("conclusion", {})
+            if isinstance(conclusion, dict):
+                refs.extend(("evidence", str(value)) for value in conclusion.get("evidence", []))
+            initialization = record.get("initialization", {})
+            if isinstance(initialization, dict):
+                for parent in initialization.get("parents", []):
+                    if isinstance(parent, dict) and isinstance(parent.get("module_id"), str):
+                        refs.append((str(parent.get("role", "parent")), parent["module_id"]))
+            design = record.get("design", {})
+            if isinstance(design, dict):
+                for relation, field in (
+                    ("dataset", "dataset_id"),
+                    ("baseline", "baseline_run_id"),
+                ):
+                    value = design.get(field)
+                    if isinstance(value, str):
+                        refs.append((relation, value))
+                for parent in design.get("inherited_modules", []):
+                    if isinstance(parent, dict) and isinstance(
+                        parent.get("module_id"), str
+                    ):
+                        refs.append(
+                            (str(parent.get("role", "module")), parent["module_id"])
+                        )
+            for relation, target in refs:
                 edges.append({"from": current_id, "relation": relation, "to": target})
                 if target in all_records:
                     visit(target)
@@ -514,7 +406,7 @@ class ModelEvolution:
         probe_id = new_id("permission-probe")
         relative_path = f"probes/{probe_id}.json"
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "probe_id": probe_id,
             "project_id": self.project.project_id,
             "created_at": now(),
