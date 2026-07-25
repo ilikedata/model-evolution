@@ -6,13 +6,18 @@ import mimetypes
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 from typing import Any, Iterable
+
+from tqdm import tqdm
 
 from .config import ProjectConfig
 from .records import iter_records
 
 
 PLAN_SCHEMA_VERSION = 1
+CACHE_SCHEMA_VERSION = 1
+DATASET_PACKAGING_VERSION = "tar-posix-zstd3-v1"
 DEFAULT_OUTPUT = Path(".model-evolution/work/storage")
 
 
@@ -20,33 +25,133 @@ def _json_bytes(value: dict[str, Any]) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _sha256_file(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+def _sha256_file(
+    path: Path,
+    chunk_size: int = 8 * 1024 * 1024,
+    *,
+    progress: bool = False,
+) -> str:
     digest = sha256()
-    with path.open("rb") as handle:
-        while chunk := handle.read(chunk_size):
-            digest.update(chunk)
+    bar = tqdm(
+        total=path.stat().st_size,
+        desc=f"hash {path.name}",
+        unit="B",
+        unit_scale=True,
+        leave=False,
+        disable=not progress or not sys.stderr.isatty(),
+    )
+    try:
+        with path.open("rb") as handle:
+            while chunk := handle.read(chunk_size):
+                digest.update(chunk)
+                bar.update(len(chunk))
+    finally:
+        bar.close()
     return digest.hexdigest()
 
 
-def _regular_files(root: Path) -> list[Path]:
+def _stat_identity(path: Path) -> dict[str, int]:
+    stat = path.stat()
+    return {
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+    }
+
+
+def _load_cache(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "dataset_packaging_version": DATASET_PACKAGING_VERSION,
+            "artifacts": {},
+        }
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        value = {}
+    if (
+        value.get("schema_version") != CACHE_SCHEMA_VERSION
+        or value.get("dataset_packaging_version") != DATASET_PACKAGING_VERSION
+        or not isinstance(value.get("artifacts"), dict)
+    ):
+        return {
+            "schema_version": CACHE_SCHEMA_VERSION,
+            "dataset_packaging_version": DATASET_PACKAGING_VERSION,
+            "artifacts": {},
+        }
+    return value
+
+
+def _save_cache(path: Path, cache: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(_json_bytes(cache))
+    temporary.replace(path)
+
+
+def _cache_key(kind: str, source_path: str, digest: str) -> str:
+    return sha256(
+        f"{kind}\0{source_path}\0{digest}\0{DATASET_PACKAGING_VERSION}".encode()
+    ).hexdigest()
+
+
+def _valid_cached_upload(entry: Any, path: Path) -> bool:
+    return (
+        isinstance(entry, dict)
+        and path.is_file()
+        and entry.get("upload_stat") == _stat_identity(path)
+        and isinstance(entry.get("sha256"), str)
+        and isinstance(entry.get("size"), int)
+    )
+
+
+def _regular_files(root: Path, *, progress: bool = False) -> list[Path]:
     if not root.is_dir():
         raise FileNotFoundError(root)
-    symlinks = sorted(path for path in root.rglob("*") if path.is_symlink())
-    if symlinks:
-        raise ValueError(f"artifact tree contains a symlink: {symlinks[0]}")
-    return sorted(path for path in root.rglob("*") if path.is_file())
+    files: list[Path] = []
+    paths = tqdm(
+        root.rglob("*"),
+        desc=f"scan {root.name}",
+        unit="entry",
+        leave=False,
+        disable=not progress or not sys.stderr.isatty(),
+    )
+    for path in paths:
+        if path.is_symlink():
+            raise ValueError(f"artifact tree contains a symlink: {path}")
+        if path.is_file():
+            files.append(path)
+    return sorted(files)
 
 
-def _tree_sha256(root: Path, files: list[Path] | None = None) -> str:
-    selected = files if files is not None else _regular_files(root)
+def _tree_sha256(
+    root: Path,
+    files: list[Path] | None = None,
+    *,
+    progress: bool = False,
+) -> str:
+    selected = files if files is not None else _regular_files(root, progress=progress)
     entries = [
         f"{path.relative_to(root).as_posix()}:{_sha256_file(path)}"
-        for path in selected
+        for path in tqdm(
+            selected,
+            desc=f"hash {root.name}",
+            unit="file",
+            leave=False,
+            disable=not progress or not sys.stderr.isatty(),
+        )
     ]
     return sha256("\n".join(entries).encode()).hexdigest()
 
 
-def _archive_dataset(source: Path, destination: Path) -> None:
+def _archive_dataset(
+    source: Path,
+    destination: Path,
+    *,
+    progress: bool = False,
+) -> None:
     if shutil.which("tar") is None or shutil.which("zstd") is None:
         raise RuntimeError("dataset packaging requires tar and zstd")
     destination.parent.mkdir(parents=True, exist_ok=True)
@@ -71,25 +176,43 @@ def _archive_dataset(source: Path, destination: Path) -> None:
         stdout=subprocess.PIPE,
     )
     assert tar.stdout is not None
-    compressed = subprocess.run(
+    compressed = subprocess.Popen(
         ["zstd", "-T0", "-3", "-q", "-o", str(temporary)],
-        stdin=tar.stdout,
-        check=False,
+        stdin=subprocess.PIPE,
     )
-    tar.stdout.close()
+    assert compressed.stdin is not None
+    archive_progress = tqdm(
+        desc=f"pack {source.name}",
+        unit="B",
+        unit_scale=True,
+        leave=False,
+        disable=not progress or not sys.stderr.isatty(),
+    )
+    try:
+        while chunk := tar.stdout.read(8 * 1024 * 1024):
+            compressed.stdin.write(chunk)
+            archive_progress.update(len(chunk))
+    finally:
+        archive_progress.close()
+        tar.stdout.close()
+        compressed.stdin.close()
     tar_status = tar.wait()
-    if tar_status or compressed.returncode:
+    compressed_status = compressed.wait()
+    if tar_status or compressed_status:
         temporary.unlink(missing_ok=True)
         raise RuntimeError(
             f"dataset archive failed for {source} "
-            f"(tar={tar_status}, zstd={compressed.returncode})"
+            f"(tar={tar_status}, zstd={compressed_status})"
         )
     temporary.replace(destination)
 
 
 def _local_artifacts(value: Any, trail: tuple[str, ...] = ()) -> Iterable[tuple[tuple[str, ...], dict[str, Any]]]:
     if isinstance(value, dict):
-        if value.get("status") == "local" and isinstance(value.get("path"), str):
+        if (
+            value.get("status") in {"local", "available"}
+            and isinstance(value.get("path"), str)
+        ):
             yield trail, value
             return
         for key, item in value.items():
@@ -121,15 +244,34 @@ def build_storage_plan(
     project: ProjectConfig,
     *,
     output: str | Path | None = None,
+    progress: bool = False,
+    rebuild: bool = False,
 ) -> dict[str, Any]:
     output_path = (
         (project.root / Path(output)).resolve()
         if output is not None
         else project.root / DEFAULT_OUTPUT
     )
-    packages = output_path / "packages"
+    cache_path = output_path / "cache" / "index.json"
+    cache = _load_cache(cache_path)
+    cached_artifacts = cache["artifacts"]
+    dataset_packages = output_path / "cache" / "datasets"
+    previous_artifacts: dict[tuple[str, str], dict[str, Any]] = {}
+    previous_plan_path = output_path / "plan.json"
+    if not rebuild and previous_plan_path.exists():
+        try:
+            _, previous_plan = load_storage_plan(project, previous_plan_path)
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            previous_plan = {}
+        previous_artifacts = {
+            (str(item.get("record_id")), str(item.get("object_path"))): item
+            for item in previous_plan.get("artifacts", [])
+            if isinstance(item, dict)
+    }
     entries: list[dict[str, Any]] = []
     destinations: set[str] = set()
+    cache_hits = 0
+    cache_misses = 0
 
     for _, record in iter_records(project):
         kind = str(record["kind"])
@@ -147,39 +289,136 @@ def build_storage_plan(
             destinations.add(destination)
 
             if kind == "dataset":
-                files = _regular_files(source)
                 expected_tree = str(artifact.get("tree_sha256", ""))
-                observed_tree = _tree_sha256(source, files)
-                if observed_tree != expected_tree:
-                    raise ValueError(f"dataset tree digest changed: {relative_source}")
-                packaged = packages / f"{record['id']}.tar.zst"
-                _archive_dataset(source, packaged)
+                key = _cache_key(kind, relative_source.as_posix(), expected_tree)
+                packaged = dataset_packages / f"{expected_tree}.tar.zst"
+                cached = cached_artifacts.get(key)
+                previous = previous_artifacts.get(
+                    (str(record["id"]), destination)
+                )
+                if (
+                    not rebuild
+                    and not _valid_cached_upload(cached, packaged)
+                    and isinstance(previous, dict)
+                    and previous.get("source_path") == relative_source.as_posix()
+                ):
+                    previous_upload = (
+                        project.root / str(previous.get("upload_path", ""))
+                    ).resolve()
+                    try:
+                        previous_upload.relative_to(project.root)
+                    except ValueError:
+                        previous_upload = Path()
+                    if (
+                        previous_upload.is_file()
+                        and previous_upload.stat().st_size == previous.get("size")
+                        and _sha256_file(previous_upload, progress=progress)
+                        == previous.get("sha256")
+                    ):
+                        packaged.parent.mkdir(parents=True, exist_ok=True)
+                        if previous_upload != packaged:
+                            previous_upload.replace(packaged)
+                        cached = {
+                            "kind": kind,
+                            "source_path": relative_source.as_posix(),
+                            "source_digest": expected_tree,
+                            "upload_path": packaged.relative_to(
+                                project.root
+                            ).as_posix(),
+                            "logical_files": int(previous["logical_files"]),
+                            "source_bytes": int(previous["source_bytes"]),
+                            "size": packaged.stat().st_size,
+                            "sha256": str(previous["sha256"]),
+                            "upload_stat": _stat_identity(packaged),
+                        }
+                        cached_artifacts[key] = cached
+                        _save_cache(cache_path, cache)
+                if rebuild or not _valid_cached_upload(cached, packaged):
+                    cache_misses += 1
+                    files = _regular_files(source, progress=progress)
+                    observed_tree = _tree_sha256(source, files, progress=progress)
+                    if observed_tree != expected_tree:
+                        raise ValueError(
+                            f"dataset tree digest changed: {relative_source}"
+                        )
+                    _archive_dataset(source, packaged, progress=progress)
+                    cached = {
+                        "kind": kind,
+                        "source_path": relative_source.as_posix(),
+                        "source_digest": expected_tree,
+                        "upload_path": packaged.relative_to(project.root).as_posix(),
+                        "logical_files": len(files),
+                        "source_bytes": sum(path.stat().st_size for path in files),
+                        "size": packaged.stat().st_size,
+                        "sha256": _sha256_file(packaged, progress=progress),
+                        "upload_stat": _stat_identity(packaged),
+                    }
+                    cached_artifacts[key] = cached
+                    _save_cache(cache_path, cache)
+                else:
+                    cache_hits += 1
                 upload_source = packaged
-                logical_files = len(files)
-                source_bytes = sum(path.stat().st_size for path in files)
+                logical_files = int(cached["logical_files"])
+                source_bytes = int(cached["source_bytes"])
+                upload_size = int(cached["size"])
+                upload_sha256 = str(cached["sha256"])
+                source_digest = expected_tree
             else:
                 if not source.is_file():
                     raise FileNotFoundError(source)
                 expected = str(artifact.get("sha256", ""))
-                observed = _sha256_file(source)
-                if observed != expected:
-                    raise ValueError(f"artifact digest changed: {relative_source}")
+                key = _cache_key("file", relative_source.as_posix(), expected)
+                cached = cached_artifacts.get(key)
+                source_stat = _stat_identity(source)
+                if (
+                    rebuild
+                    or not isinstance(cached, dict)
+                    or cached.get("source_stat") != source_stat
+                    or cached.get("sha256") != expected
+                ):
+                    cache_misses += 1
+                    observed = _sha256_file(source, progress=progress)
+                    if observed != expected:
+                        raise ValueError(
+                            f"artifact digest changed: {relative_source}"
+                        )
+                    cached = {
+                        "kind": kind,
+                        "source_path": relative_source.as_posix(),
+                        "source_digest": expected,
+                        "upload_path": relative_source.as_posix(),
+                        "logical_files": 1,
+                        "source_bytes": source.stat().st_size,
+                        "size": source.stat().st_size,
+                        "sha256": observed,
+                        "source_stat": source_stat,
+                        "upload_stat": source_stat,
+                    }
+                    cached_artifacts[key] = cached
+                    _save_cache(cache_path, cache)
+                else:
+                    cache_hits += 1
                 upload_source = source
                 logical_files = 1
                 source_bytes = source.stat().st_size
+                upload_size = int(cached["size"])
+                upload_sha256 = str(cached["sha256"])
+                source_digest = expected
 
             entries.append(
                 {
                     "record_id": str(record["id"]),
                     "record_kind": kind,
                     "role": ".".join(trail),
+                    "artifact_path": list(trail),
                     "source_path": relative_source.as_posix(),
+                    "source_digest": source_digest,
                     "upload_path": upload_source.relative_to(project.root).as_posix(),
                     "object_path": destination,
                     "logical_files": logical_files,
                     "source_bytes": source_bytes,
-                    "size": upload_source.stat().st_size,
-                    "sha256": _sha256_file(upload_source),
+                    "size": upload_size,
+                    "sha256": upload_sha256,
                     "content_type": (
                         "application/zstd"
                         if kind == "dataset"
@@ -205,7 +444,8 @@ def build_storage_plan(
             "write": "create_only",
             "overwrite": False,
             "delete": False,
-            "dataset_packaging": "deterministic_tar_zstd",
+            "dataset_packaging": DATASET_PACKAGING_VERSION,
+            "cache": "content_addressed",
         },
         "summary": {
             "records": len({entry["record_id"] for entry in entries}),
@@ -213,6 +453,8 @@ def build_storage_plan(
             "logical_files": sum(entry["logical_files"] for entry in entries),
             "source_bytes": sum(entry["source_bytes"] for entry in entries),
             "upload_bytes": sum(entry["size"] for entry in entries),
+            "cache_hits": cache_hits,
+            "cache_misses": cache_misses,
         },
     }
     output_path.mkdir(parents=True, exist_ok=True)

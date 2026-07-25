@@ -5,10 +5,13 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import MagicMock, patch
 
 from model_evolution.config import initialize_project
-from model_evolution.records import base_record, write_record
+from model_evolution.records import base_record, load_record, write_record
+from model_evolution.storage import GCSArtifactStore, LocalArtifactStore
 from model_evolution.storage_plan import build_storage_plan, load_storage_plan
+from model_evolution.storage_publish import publish_storage
 
 
 STUDY_BODY = """# Storage fixture
@@ -120,8 +123,24 @@ class StoragePlanTests(unittest.TestCase):
 
     def test_plan_uses_record_ids_and_is_deterministic(self) -> None:
         first = build_storage_plan(self.project)
-        second = build_storage_plan(self.project)
+        with (
+            patch(
+                "model_evolution.storage_plan._regular_files",
+                side_effect=AssertionError("dataset scan should be cached"),
+            ),
+            patch(
+                "model_evolution.storage_plan._archive_dataset",
+                side_effect=AssertionError("dataset archive should be cached"),
+            ),
+            patch(
+                "model_evolution.storage_plan._sha256_file",
+                side_effect=AssertionError("file hashes should be cached"),
+            ),
+        ):
+            second = build_storage_plan(self.project)
         self.assertEqual(first["plan_sha256"], second["plan_sha256"])
+        self.assertEqual(second["summary"]["cache_misses"], 0)
+        self.assertEqual(second["summary"]["cache_hits"], 3)
         self.assertEqual(
             {item["object_path"] for item in first["artifacts"]},
             {
@@ -131,7 +150,7 @@ class StoragePlanTests(unittest.TestCase):
             },
         )
         _, loaded = load_storage_plan(self.project)
-        self.assertEqual(first, loaded)
+        self.assertEqual(second, loaded)
 
     def test_plan_detects_changed_artifact(self) -> None:
         build_storage_plan(self.project)
@@ -145,6 +164,118 @@ class StoragePlanTests(unittest.TestCase):
         self.assertNotIn("import_id", encoded)
         self.assertTrue(all(item["record_id"] for item in plan["artifacts"]))
 
+    def test_publish_is_create_only_verified_and_idempotent(self) -> None:
+        remote = LocalArtifactStore(self.root / ".remote")
+        first = publish_storage(self.project, store=remote, commit=False)
+        self.assertEqual(first["status"], "verified")
+        self.assertEqual(first["summary"]["created"], 3)
+        self.assertEqual(first["summary"]["existing"], 0)
+        self.assertEqual(first["summary"]["updated_records"], 3)
+
+        dataset = load_record(self.project, "dataset", "dataset-one")
+        self.assertEqual(dataset["artifact"]["status"], "available")
+        self.assertTrue(dataset["artifact"]["uri"].endswith("tree.tar.zst"))
+        self.assertEqual(
+            dataset["artifact"]["storage"]["object_sha256"],
+            first["artifacts"][0]["sha256"],
+        )
+        self.assertTrue(
+            (self.project.work_dir / "storage" / "receipt.json").is_file()
+        )
+
+        with (
+            patch.object(remote, "create_file", wraps=remote.create_file) as create,
+            patch(
+                "model_evolution.storage_publish._verify_local",
+                side_effect=AssertionError(
+                    "verified remote objects should not read local files"
+                ),
+            ),
+        ):
+            second = publish_storage(self.project, store=remote, commit=False)
+        create.assert_not_called()
+        self.assertEqual(second["plan_sha256"], first["plan_sha256"])
+        self.assertEqual(second["summary"]["created"], 0)
+        self.assertEqual(second["summary"]["existing"], 3)
+        self.assertEqual(second["summary"]["updated_records"], 0)
+
+    def test_publish_rejects_a_conflicting_remote_without_updating_records(self) -> None:
+        remote = LocalArtifactStore(self.root / ".remote")
+        remote.create_bytes(
+            "datasets/dataset-one/tree.tar.zst",
+            b"not the planned archive",
+        )
+        with self.assertRaisesRegex(ValueError, "remote (size|SHA-256) mismatch"):
+            publish_storage(self.project, store=remote, commit=False)
+        dataset = load_record(self.project, "dataset", "dataset-one")
+        self.assertEqual(dataset["artifact"]["status"], "local")
+        self.assertNotIn("uri", dataset["artifact"])
+
+    def test_changed_cached_dataset_package_is_rebuilt(self) -> None:
+        first = build_storage_plan(self.project)
+        dataset = next(
+            item
+            for item in first["artifacts"]
+            if item["record_kind"] == "dataset"
+        )
+        package = self.root / dataset["upload_path"]
+        package.write_bytes(b"corrupt cache")
+
+        rebuilt = build_storage_plan(self.project)
+        self.assertEqual(rebuilt["plan_sha256"], first["plan_sha256"])
+        self.assertGreaterEqual(rebuilt["summary"]["cache_misses"], 1)
+        self.assertEqual(_file_sha(package), dataset["sha256"])
+
+    def test_gcs_file_creation_always_uses_create_only_precondition(self) -> None:
+        source = self.root / "artifact.bin"
+        source.write_bytes(b"immutable")
+        blob = MagicMock()
+        blob.size = len(b"immutable")
+        blob.generation = 42
+        blob.metadata = {"model-evolution-sha256": _file_sha(source)}
+        bucket = MagicMock()
+        bucket.blob.return_value = blob
+        client = MagicMock()
+        client.bucket.return_value = bucket
+
+        with patch("google.cloud.storage.Client", return_value=client):
+            store = GCSArtifactStore("gs://example/model-evolution")
+            result = store.create_file(
+                "runs/run-one/artifact.bin",
+                source,
+                content_type="application/octet-stream",
+                metadata={"model-evolution-sha256": _file_sha(source)},
+            )
+
+        blob.upload_from_file.assert_called_once()
+        upload_call = blob.upload_from_file.call_args
+        self.assertEqual(
+            upload_call.kwargs,
+            {
+                "size": source.stat().st_size,
+                "content_type": "application/octet-stream",
+                "if_generation_match": 0,
+                "checksum": "auto",
+            },
+        )
+        self.assertEqual(
+            blob.metadata,
+            {"model-evolution-sha256": _file_sha(source)},
+        )
+        self.assertEqual(result["generation"], "42")
+
+    def test_file_creation_reports_transferred_bytes(self) -> None:
+        source = self.root / "progress.bin"
+        source.write_bytes(b"x" * (9 * 1024 * 1024))
+        transferred: list[int] = []
+        remote = LocalArtifactStore(self.root / ".remote")
+        remote.create_file(
+            "runs/run-one/progress.bin",
+            source,
+            progress_callback=transferred.append,
+        )
+        self.assertEqual(sum(transferred), source.stat().st_size)
+        self.assertGreater(len(transferred), 1)
 
 if __name__ == "__main__":
     unittest.main()

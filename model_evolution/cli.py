@@ -14,6 +14,7 @@ from .migration_v2 import migrate_v2
 from .service import ModelEvolution
 from .storage import upload_file
 from .storage_plan import build_storage_plan
+from .storage_publish import publish_storage
 
 LATENT_ARBORIST_METRIC_ADAPTER = "latent-arborist.metric"
 
@@ -122,6 +123,21 @@ def _parser() -> argparse.ArgumentParser:
         "plan", help="plan normal-path storage for local record artifacts"
     )
     storage_plan.add_argument("--output", help="storage work directory")
+    storage_plan.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="ignore local storage caches and fully hash/package artifacts",
+    )
+    storage_publish = storage_commands.add_parser(
+        "publish",
+        help="validate, plan, create, verify, and record immutable artifacts",
+    )
+    storage_publish.add_argument("--output", help="storage work directory")
+    storage_publish.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="ignore local storage caches and fully hash/package artifacts",
+    )
     return parser
 
 
@@ -137,7 +153,16 @@ def _emit(result: dict[str, Any], *, as_json: bool) -> None:
         summary = result["summary"]
         print(
             f"planned {result['plan_sha256'][:12]}: {summary['logical_files']} logical "
-            f"files, {summary['objects']} objects, {summary['upload_bytes']} upload bytes"
+            f"files, {summary['objects']} objects, {summary['upload_bytes']} upload bytes, "
+            f"{summary.get('cache_hits', 0)} cached"
+        )
+    elif result.get("kind") == "artifact_storage_receipt":
+        summary = result["summary"]
+        print(
+            f"published {result['plan_sha256'][:12]}: {summary['created']} created, "
+            f"{summary['existing']} already verified, "
+            f"{summary['updated_records']} records updated, "
+            f"{summary.get('cache_hits', 0)} cached"
         )
     elif result.get("valid"):
         if "records" in result:
@@ -254,12 +279,25 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         )
     if args.command == "storage":
         if args.storage_command == "plan":
-            plan = build_storage_plan(service.project, output=args.output)
+            plan = build_storage_plan(
+                service.project,
+                output=args.output,
+                progress=not args.json,
+                rebuild=args.rebuild,
+            )
             return {
                 "kind": plan["kind"],
                 "plan_sha256": plan["plan_sha256"],
                 "summary": plan["summary"],
             }
+        if args.storage_command == "publish":
+            return publish_storage(
+                service.project,
+                output=args.output,
+                commit=not args.no_commit,
+                progress=not args.json,
+                rebuild=args.rebuild,
+            )
         return service.probe_storage()
     return service.lineage(args.record_id)
 

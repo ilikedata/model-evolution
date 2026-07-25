@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from pathlib import Path, PurePosixPath
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
 
@@ -16,8 +16,18 @@ class ArtifactStore(Protocol):
     base_uri: str
 
     def create_bytes(self, relative_path: str, payload: bytes, *, content_type: str | None = None) -> str: ...
+    def create_file(
+        self,
+        relative_path: str,
+        source: Path,
+        *,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]: ...
     def read_bytes(self, relative_path: str) -> bytes: ...
     def exists(self, relative_path: str) -> bool: ...
+    def stat(self, relative_path: str) -> dict[str, Any] | None: ...
 
 
 def _clean_relative(path: str) -> str:
@@ -46,11 +56,48 @@ class LocalArtifactStore:
             raise ArtifactCollisionError(str(destination)) from error
         return destination.resolve().as_uri()
 
+    def create_file(
+        self,
+        relative_path: str,
+        source: Path,
+        *,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        del content_type, metadata
+        destination = self.root / _clean_relative(relative_path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with source.open("rb") as source_handle, destination.open("xb") as target:
+                while chunk := source_handle.read(8 * 1024 * 1024):
+                    target.write(chunk)
+                    if progress_callback:
+                        progress_callback(len(chunk))
+        except FileExistsError as error:
+            raise ArtifactCollisionError(str(destination)) from error
+        return self.stat(relative_path) or {}
+
     def read_bytes(self, relative_path: str) -> bytes:
         return (self.root / _clean_relative(relative_path)).read_bytes()
 
     def exists(self, relative_path: str) -> bool:
         return (self.root / _clean_relative(relative_path)).exists()
+
+    def stat(self, relative_path: str) -> dict[str, Any] | None:
+        path = self.root / _clean_relative(relative_path)
+        if not path.exists():
+            return None
+        payload_sha256 = sha256()
+        with path.open("rb") as handle:
+            while chunk := handle.read(8 * 1024 * 1024):
+                payload_sha256.update(chunk)
+        return {
+            "uri": path.resolve().as_uri(),
+            "size": path.stat().st_size,
+            "sha256": payload_sha256.hexdigest(),
+            "generation": None,
+        }
 
 
 class GCSArtifactStore:
@@ -85,11 +132,56 @@ class GCSArtifactStore:
             raise ArtifactCollisionError(f"gs://{self.bucket_name}/{name}") from error
         return f"gs://{self.bucket_name}/{name}"
 
+    def create_file(
+        self,
+        relative_path: str,
+        source: Path,
+        *,
+        content_type: str | None = None,
+        metadata: dict[str, str] | None = None,
+        progress_callback: Callable[[int], None] | None = None,
+    ) -> dict[str, Any]:
+        from google.api_core.exceptions import PreconditionFailed
+
+        name = self._name(relative_path)
+        blob = self._bucket.blob(name)
+        blob.metadata = metadata or {}
+        try:
+            with source.open("rb") as source_handle:
+                reader = _ProgressReader(source_handle, progress_callback)
+                blob.upload_from_file(
+                    reader,
+                    size=source.stat().st_size,
+                    content_type=content_type,
+                    if_generation_match=0,
+                    checksum="auto",
+                )
+        except PreconditionFailed as error:
+            raise ArtifactCollisionError(f"gs://{self.bucket_name}/{name}") from error
+        return self.stat(relative_path) or {}
+
     def read_bytes(self, relative_path: str) -> bytes:
         return self._bucket.blob(self._name(relative_path)).download_as_bytes()
 
     def exists(self, relative_path: str) -> bool:
         return self._bucket.blob(self._name(relative_path)).exists()
+
+    def stat(self, relative_path: str) -> dict[str, Any] | None:
+        from google.api_core.exceptions import NotFound
+
+        name = self._name(relative_path)
+        blob = self._bucket.blob(name)
+        try:
+            blob.reload()
+        except NotFound:
+            return None
+        metadata = blob.metadata or {}
+        return {
+            "uri": f"gs://{self.bucket_name}/{name}",
+            "size": int(blob.size or 0),
+            "sha256": metadata.get("model-evolution-sha256"),
+            "generation": str(blob.generation) if blob.generation is not None else None,
+        }
 
 
 def open_store(uri: str) -> ArtifactStore:
@@ -99,6 +191,25 @@ def open_store(uri: str) -> ArtifactStore:
     if parsed.scheme == "file":
         return LocalArtifactStore(Path(parsed.path))
     raise ValueError(f"unsupported artifact store: {uri}")
+
+
+class _ProgressReader:
+    def __init__(
+        self,
+        handle: Any,
+        callback: Callable[[int], None] | None,
+    ):
+        self._handle = handle
+        self._callback = callback
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._handle.read(size)
+        if chunk and self._callback:
+            self._callback(len(chunk))
+        return chunk
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._handle, name)
 
 
 def create_json(store: ArtifactStore, relative_path: str, value: dict[str, Any]) -> str:

@@ -155,18 +155,24 @@ copies; redacts secret-shaped values; and hashes the captured source prefix.
 Agents use the evidence to author ordinary studies, datasets, runs, modules,
 and assessments.
 
-## Storage planning
+## Artifact publishing
 
-Create a deterministic local plan for every artifact currently referenced with
-`status: local`:
+The routine interface is one command:
 
 ```bash
-make research-storage-plan
+make research-publish
 ```
 
-The plan is written under `.model-evolution/work/storage`. Dataset trees become
-deterministic `tar.zst` archives. Other files remain individually addressable.
-Destinations are derived directly from record IDs:
+It validates the registry, builds the deterministic storage plan, packages
+datasets, performs create-only uploads, verifies every remote size and SHA-256,
+writes a receipt, adds verified GCS identities to the canonical records, and
+commits only the changed record documents. Interactive runs show TQDM progress
+for dataset scanning, hashing and packaging, bytes transferred, and remote
+object verification.
+
+The plan and receipt live under `.model-evolution/work/storage`. Dataset trees
+become deterministic `tar.zst` archives. Other files remain individually
+addressable. Destinations are derived directly from record IDs:
 
 ```text
 datasets/<dataset-id>/tree.tar.zst
@@ -175,8 +181,19 @@ modules/<module-name>/<module-id>/weights.pt
 assessments/<assessment-id>/<artifact>
 ```
 
-Planning performs no GCS operation. The plan declares create-only writes and
-contains no overwrite or delete behavior.
+Every GCS creation uses an object-generation precondition that forbids
+overwriting. On a retry, an existing object is accepted only when its stored
+SHA-256 and size match the plan. No publish path deletes an object.
+
+Verified dataset packages and file hashes are cached by canonical digest under
+`.model-evolution/work/storage/cache`. A repeated publish reuses the packages,
+skips unchanged file hashing, and checks GCS metadata before reading any local
+upload bytes. Cache entries invalidate independently when a source file,
+package, expected digest, or packaging version changes.
+
+`make research-storage-plan` remains available as a non-publishing diagnostic.
+Use `STORAGE_REBUILD=1 make research-publish` only for a deliberate full
+rehash and repackaging audit.
 
 ## Authentication and routine commands
 
@@ -193,7 +210,7 @@ Never inspect, print, copy, or commit the credential file.
 make research-validate
 make research-status
 make research-lineage RECORD_ID=<record-id>
-make research-gcs-probe
+make research-publish
 ```
 
 Launches reject uncommitted source or configuration changes. Each lifecycle
