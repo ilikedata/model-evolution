@@ -1,238 +1,200 @@
 # Model Evolution
 
-Model Evolution is the research provenance and artifact-lineage layer used by
-Latent Arborist. It is incubated in this repository as the project-independent
-`model_evolution` package and can later be extracted without moving the
-Latent Arborist adapter into its core.
-
-Other projects implement the `ProjectAdapter` protocol and may register it with
-the `model_evolution.adapters` Python entry-point group. The core record,
-storage, Git, and CLI layers do not import Latent Arborist until its configured
-adapter is invoked.
-
-Git is authoritative for lightweight intent, provenance, results, and decisions.
-GCS is authoritative for immutable large artifacts. IDs combine a readable slug
-with a ULID and are never reused.
+Model Evolution is the Markdown-first research provenance and artifact-lineage
+layer used by Latent Arborist. Git is authoritative for research intent,
+reasoning, summaries, and lineage. GCS is authoritative for immutable datasets,
+weights, complete metrics, and reports after publication.
 
 ## Records
 
 The `.model-evolution/project.yaml` file selects the project, adapter, and
-artifact store. Git-tracked records live under `model-evolution/`:
+artifact store. Record kind comes from the directory and record ID comes from
+the Markdown filename:
 
-| Record | Format | Purpose |
-| --- | --- | --- |
-| Hypothesis | Markdown with YAML front matter | Research claim and expected evidence |
-| Experiment | YAML | Planned comparison linked to hypotheses and config |
-| Dataset | YAML | Generator/config/commit provenance and immutable GCS object tree |
-| Run | YAML | One execution with pinned inputs, initialization, status, and outputs |
-| Evaluation | YAML | Metrics and report against a pinned dataset |
-| Module | YAML | Reusable weights, compatibility contract, and source run |
-| Decision | Markdown with YAML front matter | Human-readable conclusions and approvals |
+| Directory | Purpose |
+| --- | --- |
+| `studies/` | Claim, method, expected evidence, conclusion, and next action |
+| `datasets/` | Generator provenance and versioned dataset artifact |
+| `runs/` | Pinned execution inputs, primary results, artifacts, and anomalies |
+| `modules/` | Reusable weights and compatibility contract |
+| `assessments/` | Later, additional, or independently versioned evaluation |
 
-Run statuses are `planned`, `running`, `completed`, `failed`, or `interrupted`.
-Failed and interrupted runs remain part of the history. Modules begin as
-`candidate`; promotion requires a human instruction and produces a Markdown
-decision note.
+IDs normally use a readable slug plus ULID. When contemporaneous work is
+materialized from corroborated evidence, the ULID timestamp is derived from the
+earliest observed event and its random component from the source identity. This
+makes repeated materialization stable without rewriting Git history.
 
-From-scratch runs explicitly have no parents:
+YAML front matter contains machine-validated state and references. Markdown
+contains the explanation. Git supplies authorship and change history.
 
-```yaml
-initialization:
-  kind: from_scratch
-  parents: []
+## Study authoring
+
+Create the canonical file directly under `model-evolution/studies/`. Its
+filename is its stable ID:
+
+```markdown
+---
+status: planned
+references:
+  - <prior-run-id>
+design:
+  dataset_id: <dataset-id>
+  config: configs/example.toml
+  baseline_run_id: <optional-run-id>
+  inherited_modules:
+    - role: metric_encoder
+      module_id: <module-id>
+---
+
+# Study title
+
+## Claim
+
+The claim being tested.
+
+## Basis
+
+Why the claim is plausible and which prior evidence supports it.
+
+## Expected evidence
+
+The measurable success criterion.
+
+## Falsification
+
+The result that rejects the claim.
+
+## Method
+
+The controlled comparison to execute.
 ```
 
-Inherited runs pin exact module IDs. The Latent Arborist metric adapter verifies
-the model dimensions, architecture contract, and tensor vocabulary before
-loading inherited weights into a fresh optimizer and training schedule.
+Validate and commit the plan:
 
-## Agent workflow
+```bash
+make research-plan STUDY=model-evolution/studies/<study-id>.md
+```
 
-Set an agent identity and the credential path in the process environment:
+Study states are `draft`, `planned`, `active`, `concluded`, and `cancelled`.
+Concluded studies add structured outcome, confidence, and evidence in front
+matter plus `Observations`, `Conclusion`, and `Next action` sections:
+
+```bash
+make research-conclude STUDY=model-evolution/studies/<study-id>.md
+```
+
+## Runs, modules, and assessments
+
+Plan and execute a run from the study's design:
+
+```bash
+make research-run-plan RUN_SLUG=<slug> STUDY_ID=<study-id>
+make research-run RUN_ID=<run-id>
+```
+
+The run snapshots the tracked config digest, source revision, dataset,
+baseline, and inherited module IDs and hashes. From-scratch initialization has
+no parents. Successful execution embeds its primary result and publishes every
+adapter-declared module as `available`. There is no promotion or approval gate.
+
+Modules may be `available`, `deprecated`, or `unavailable`. Deprecated modules
+remain in lineage but cannot initialize new work. Unavailable module records
+preserve dependencies whose exact artifact cannot be recovered.
+
+Use an assessment only when evaluation is later or independently versioned:
+
+```bash
+make research-assess \
+  RUN_ID=<run-id> \
+  DATASET_ID=<dataset-id> \
+  REPORT=<report.json> \
+  EVALUATOR=<name> \
+  EVALUATOR_VERSION=<version> \
+  PURPOSE="<reason>"
+```
+
+## Availability
+
+Canonical records distinguish three artifact states:
+
+```yaml
+# Present in this repository workspace
+status: local
+path: runs/example/best.pt
+sha256: <digest>
+
+# Published immutable object
+status: available
+uri: gs://bucket/prefix/runs/<run-id>/best.pt
+sha256: <digest>
+generation: <generation>
+crc32c: <checksum>
+
+# Exact value or artifact cannot be obtained
+status: unavailable
+```
+
+Missing scalar facts use `{status: unavailable}`. Missing dependency artifacts
+receive normal dataset or module records with status `unavailable`, preserving
+a navigable graph without inventing replacements.
+
+## Codex evidence
+
+Codex sessions are one evidence source, not a record type. Collect and validate
+only sessions whose working directory exactly matches this repository:
+
+```bash
+make research-evidence-codex
+make research-evidence-validate
+```
+
+Normalized evidence lives under `.model-evolution/work/evidence/codex`. The
+collector includes visible user/agent messages and tool calls/results; excludes
+reasoning, system/developer messages, compaction payloads, and raw transcript
+copies; redacts secret-shaped values; and hashes the captured source prefix.
+Agents use the evidence to author ordinary studies, datasets, runs, modules,
+and assessments.
+
+## Storage planning
+
+Create a deterministic local plan for every artifact currently referenced with
+`status: local`:
+
+```bash
+make research-storage-plan
+```
+
+The plan is written under `.model-evolution/work/storage`. Dataset trees become
+deterministic `tar.zst` archives. Other files remain individually addressable.
+Destinations are derived directly from record IDs:
+
+```text
+datasets/<dataset-id>/tree.tar.zst
+runs/<run-id>/<artifact>
+modules/<module-name>/<module-id>/weights.pt
+assessments/<assessment-id>/<artifact>
+```
+
+Planning performs no GCS operation. The plan declares create-only writes and
+contains no overwrite or delete behavior.
+
+## Authentication and routine commands
+
+Set actor identity and the credential path in the process environment:
 
 ```bash
 export MODEL_EVOLUTION_ACTOR="agent-name"
 export GOOGLE_APPLICATION_CREDENTIALS="$HOME/Downloads/latent-arborist-017d179c5642.json"
 ```
 
-Never inspect, print, copy, or commit the credential file. The Python GCS client
-consumes the path through Application Default Credentials.
-
-The normal workflow is:
-
-1. Record a hypothesis and experiment.
-2. Generate/register an immutable dataset.
-3. Plan and commit a run before allocating compute.
-4. Claim and execute the run.
-5. Record its evaluation and candidate module.
-6. Promote only after explicit human approval.
-
-Agents should also record consequential research-direction choices with
-`make research-decision`. The generated Markdown keeps observations, inference,
-confidence, and next action in separate sections and links the evidence records.
-
-Use `make help` for the corresponding `research-*` targets. Examples:
+Never inspect, print, copy, or commit the credential file.
 
 ```bash
 make research-validate
 make research-status
+make research-lineage RECORD_ID=<record-id>
 make research-gcs-probe
-make research-backfill-codex
-make research-backfill-validate
-make research-backfill-upload-plan
-make research-backfill-upload
-make research-backfill-upload-verify
-
-make research-dataset \
-  DATASET_SLUG=metric-depth \
-  DATASET_CONFIG=configs/data_depth_fixture.toml
-
-make research-run-plan \
-  RUN_SLUG=metric-depth \
-  EXPERIMENT_ID=<experiment-id> \
-  DATASET_ID=<dataset-id> \
-  RUN_CONFIG=configs/metric_depth_fixture.toml
-
-make research-run RUN_ID=<run-id>
-make research-lineage RECORD_ID=<module-or-run-id>
 ```
 
-An evidence-derived hypothesis should reference the canonical records that
-support it:
-
-```bash
-make research-hypothesis \
-  HYPOTHESIS_SLUG=source-conditioned-tape \
-  TITLE="Source-conditioned action embeddings improve tape execution" \
-  BODY_FILE=/path/to/hypothesis.md \
-  REFERENCE_IDS="<run-id> <evaluation-id> <decision-id>"
-```
-
-References are validated and become part of the repository lineage graph.
-
-Each mutation commits only its generated research records. Launches fail while
-tracked source or configuration changes are uncommitted. This guarantees that
-the recorded Git revision describes the code that ran.
-
-## Immutable artifacts
-
-Artifacts are stored below:
-
-```text
-gs://latent-arborist-models/model-evolution/latent-arborist/
-  datasets/<dataset-id>/
-  runs/<run-id>/
-  modules/<module-name>/<module-id>/
-  evaluations/<evaluation-id>/
-  claims/<run-id>.json
-```
-
-Dataset directories are uploaded as object trees with a checksummed
-`_index.json`. Every upload uses the GCS create-only generation precondition.
-Existing objects cause a hard failure; Model Evolution exposes no overwrite or
-delete operation. A one-shot claim prevents two agents from executing the same
-run ID. Interrupted work is retried with a new run ID.
-
-`make research-gcs-probe` is the opt-in live acceptance check. It creates,
-reads back, and intentionally retains a uniquely named object under `probes/`.
-
-The dataset record connects every immutable dataset to its generator entrypoint,
-Git revision, config path and digest, seed, generated metadata digest, and GCS
-index. Run records then pin that dataset ID, closing the provenance chain from
-generator source to trained weights.
-
-## Historical Codex session backfill
-
-Historical reconstruction is deliberately separated from the canonical
-Git-tracked registry. Run:
-
-```bash
-make research-backfill-codex
-make research-backfill-validate
-```
-
-The extractor selects only sessions whose recorded working directory exactly
-matches the project root. It writes an ignored local bundle under
-`.model-evolution/work/backfill/codex/` containing:
-
-- a source and policy manifest;
-- normalized visible user/agent messages and tool interactions;
-- local run/checkpoint, terminal TensorBoard scalar, and dataset-manifest identities;
-- Git history and mentioned-path correlations;
-- mechanically grounded run, module, evaluation, and dataset draft candidates;
-- keyword-selected hypothesis, decision, and result review leads; and
-- a human review report.
-
-It excludes reasoning events, system/developer messages, compaction payloads,
-and recently modified sessions. Secret-shaped values are redacted, large tool
-payloads are truncated, and generic checkpoint discovery hashes `.pt` files.
-When an adapter provides a safe historical inspector, it may additionally read
-metadata using a weights-only loader; model, optimizer, RNG, and other tensor
-state is omitted from the bundle. Raw transcripts remain in the local Codex
-session store and are never copied to GCS.
-
-Validation re-hashes every bundle file, original source session, discovered
-checkpoint, metrics file, and dataset manifest. It also verifies evidence
-uniqueness, source pointers, allowed event types, redaction safety, and recorded
-Git commit availability. Replayed context copied into forked sessions remains
-available as evidence but is marked and excluded from draft correlations and
-review leads. Source-session validation hashes the exact captured byte prefix,
-so a continuing Codex session may append new events without invalidating
-historical evidence; changes within the captured prefix still fail validation.
-TensorBoard event files are hashed and their final scalar point per tag is
-recorded separately from best-checkpoint metrics. Use `--skip-source-digests` or
-`--skip-artifact-digests` only for a fast diagnostic; reviewed backfill should
-pass the full validation.
-
-Review leads are not claims. Before creating a canonical record, reconcile its
-technical fields against Git, artifact hashes, manifests, and metrics. A
-backfilled record can preserve field-level evidence with optional provenance.
-The generated `drafts.jsonl` keeps unknown dataset, module-initialization,
-compatibility-contract, and Git fields explicitly unresolved rather than
-guessing:
-
-```yaml
-provenance:
-  - kind: codex_session
-    locator: 019...#ev-a1b2c3
-    sha256: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
-    claim_type: inferred
-    confidence: medium
-  - kind: run_metrics
-    locator: runs/metric-v1/metrics.jsonl
-    sha256: fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
-    claim_type: observed
-    confidence: high
-```
-
-Allowed provenance kinds are `codex_session`, `git`, `artifact`,
-`dataset_manifest`, `run_metrics`, and `human_attestation`. Canonical repository
-validation also rejects cyclic run/module weight inheritance.
-
-### Uploading accepted historical artifacts
-
-After review and full backfill validation, the historical import has three
-explicit stages:
-
-```bash
-make research-backfill-upload-plan
-make research-backfill-upload
-make research-backfill-upload-verify
-```
-
-The plan is written under `.model-evolution/work/backfill/upload/`. It derives
-its scope from dataset and run candidates in the reviewed bundle. Raw Codex
-sessions, normalized evidence, Git-tracked research records, caches, and
-unresolved or missing artifacts are not uploaded.
-
-Datasets are packaged as deterministic `tar.zst` archives. This preserves every
-file without creating millions of tiny GCS objects. Run files remain separate,
-so checkpoints and reports can be addressed directly for module inheritance.
-The import is stored below `historical/<import-id>/`; its immutable plan and
-receipt are stored below `imports/<import-id>/`.
-
-Every write uses `if_generation_match=0`. A retry skips an existing object only
-when its byte size and SHA-256 metadata match the plan; any difference is an
-immutable collision and stops the import. Upload verification checks every
-object's generation, size, CRC32C presence, and SHA-256 metadata. There is no
-overwrite or delete path.
+Launches reject uncommitted source or configuration changes. Each lifecycle
+mutation commits only its generated research documents.
