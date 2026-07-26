@@ -63,12 +63,15 @@ class LatentArboristAdapter:
 
 
 _CHECKPOINT_METADATA_KEYS = {
+    "atomic_preflight",
+    "baseline_metrics",
     "batch_size",
     "best_loss",
     "best_relative_progress",
     "cache_identity",
     "checkpoint_selection",
     "config",
+    "config_sha256",
     "cuda",
     "dataset",
     "dataset_manifest_sha256",
@@ -77,6 +80,7 @@ _CHECKPOINT_METADATA_KEYS = {
     "distilled_text_checkpoint_sha256",
     "entropy_weight",
     "epoch",
+    "frozen_modules",
     "global_step",
     "last_metrics",
     "latent_dim",
@@ -110,6 +114,7 @@ _CHECKPOINT_METADATA_KEYS = {
     "tape_checkpoint_sha256",
     "tape_metrics",
     "tape_sha256",
+    "task_embedding_contract",
     "target_iterations",
     "teacher_dim",
     "teacher_model",
@@ -119,11 +124,15 @@ _CHECKPOINT_METADATA_KEYS = {
     "text_encoder_config",
     "text_lr",
     "train_pairs",
+    "trained_modules",
     "tree_lr",
     "val_pairs",
     "vocabulary_sha256",
     "warm_start_checkpoint",
     "warm_start_sha256",
+    "source_checkpoint",
+    "source_checkpoint_sha256",
+    "source_revision",
 }
 
 
