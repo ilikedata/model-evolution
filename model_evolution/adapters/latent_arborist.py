@@ -63,6 +63,7 @@ class LatentArboristAdapter:
 
 
 _CHECKPOINT_METADATA_KEYS = {
+    "attempt",
     "atomic_preflight",
     "baseline_metrics",
     "batch_size",
