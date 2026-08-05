@@ -7,6 +7,11 @@ module, and assessment. Studies combine claim and experimental design; runs
 embed their primary evaluation; every successful training run publishes
 reusable module outputs. There are no decision, promotion, or approval records.
 
+Studies and runs can also record typed component outcomes when a combined
+claim contains independently supported, rejected, inconclusive, or
+non-diagnostic parts. This prevents an overall gate from hiding reusable
+capability while preserving the original study conclusion.
+
 ## Evidence-native materialization
 
 Work completed before the registry existed is represented with exactly the same

@@ -83,6 +83,43 @@ matter plus `Observations`, `Conclusion`, and `Next action` sections:
 make research-conclude STUDY=model-evolution/studies/<study-id>.md
 ```
 
+## Component outcomes
+
+Studies and runs may decompose a combined result into machine-readable
+component outcomes. Use this when an overall gate combines independently
+useful capabilities and a single pass/fail label would hide what should be
+retained or changed:
+
+```yaml
+component_outcomes:
+- component: semantic_transform_policy
+  outcome: supported
+  summary: Held-out semantic execution passed every policy gate.
+  reusable: true
+  metrics:
+    closed_loop_semantic_accuracy: 0.8046875
+- component: transition_oracle
+  outcome: rejected
+  summary: The predicted local target moved away from the observed checkpoint.
+  reusable: false
+  metrics:
+    goal_relative_progress: -0.6991605
+- component: exact_legacy_svg_match
+  outcome: not_diagnostic
+  summary: The legacy target contains an unexpressed random magnitude.
+  reason: Exact equality cannot measure qualitative relative execution.
+```
+
+Allowed outcomes are `supported`, `rejected`, `inconclusive`, and
+`not_diagnostic`. Each entry requires a stable component name and concise
+summary. `reusable` and `metrics` are optional. A `not_diagnostic` result must
+explain why the measurement cannot test the component.
+
+Component outcomes do not override the study's overall conclusion. They make
+partial success explicit and identify which checkpoint components may be
+legitimate parents for later studies. Prefer these evidence-bound terms over
+the subjective label `promising`.
+
 ## Runs, modules, and assessments
 
 Plan and execute a run from the study's design:

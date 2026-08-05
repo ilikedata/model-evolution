@@ -24,6 +24,12 @@ STATUSES = {
     "assessment": {"completed", "failed"},
 }
 STUDY_OUTCOMES = {"supported", "rejected", "inconclusive"}
+COMPONENT_OUTCOMES = {
+    "supported",
+    "rejected",
+    "inconclusive",
+    "not_diagnostic",
+}
 PROVENANCE_KINDS = {
     "codex_session",
     "git",
@@ -112,6 +118,7 @@ def validate_record(
     if not _title(body):
         raise ValueError(f"{kind} record requires a level-one Markdown title")
     _validate_provenance(record)
+    _validate_component_outcomes(record)
     if kind == "study":
         _validate_study(record, body)
     elif kind == "dataset":
@@ -162,6 +169,56 @@ def _validate_study(record: dict[str, Any], body: str) -> None:
     missing = sorted(required - _headings(body))
     if missing:
         raise ValueError("study missing Markdown sections: " + ", ".join(missing))
+
+
+def _validate_component_outcomes(record: dict[str, Any]) -> None:
+    outcomes = record.get("component_outcomes")
+    if outcomes is None:
+        return
+    if not isinstance(outcomes, list) or not outcomes:
+        raise ValueError("component_outcomes must be a non-empty list")
+    names: set[str] = set()
+    for index, outcome in enumerate(outcomes):
+        if not isinstance(outcome, dict):
+            raise ValueError(
+                f"component outcome {index} must be a mapping"
+            )
+        component = outcome.get("component")
+        if not isinstance(component, str) or not component.strip():
+            raise ValueError(
+                f"component outcome {index} requires a component"
+            )
+        if component in names:
+            raise ValueError(f"duplicate component outcome: {component}")
+        names.add(component)
+        if outcome.get("outcome") not in COMPONENT_OUTCOMES:
+            raise ValueError(
+                f"component outcome {component} must be supported, "
+                "rejected, inconclusive, or not_diagnostic"
+            )
+        if not isinstance(outcome.get("summary"), str) or not outcome[
+            "summary"
+        ].strip():
+            raise ValueError(
+                f"component outcome {component} requires a summary"
+            )
+        reusable = outcome.get("reusable")
+        if reusable is not None and not isinstance(reusable, bool):
+            raise ValueError(
+                f"component outcome {component} reusable must be boolean"
+            )
+        metrics = outcome.get("metrics")
+        if metrics is not None and not isinstance(metrics, dict):
+            raise ValueError(
+                f"component outcome {component} metrics must be a mapping"
+            )
+        if (
+            outcome["outcome"] == "not_diagnostic"
+            and not isinstance(outcome.get("reason"), str)
+        ):
+            raise ValueError(
+                f"component outcome {component} requires a reason"
+            )
 
 
 def _validate_run(record: dict[str, Any]) -> None:

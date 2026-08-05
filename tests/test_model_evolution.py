@@ -14,6 +14,7 @@ from model_evolution.records import (
     load_document,
     load_record,
     validate_repository,
+    validate_record,
     write_record,
 )
 from model_evolution.service import ModelEvolution
@@ -196,6 +197,31 @@ class StorageTests(unittest.TestCase):
 
 
 class RegistryTests(ProjectCase):
+    def test_component_outcomes_are_typed_and_component_scoped(self) -> None:
+        dataset = self.create_dataset()
+        study = self.create_study(dataset["id"], study_id="components")
+        stored, body = load_document(self.project, "study", study["id"])
+        stored["component_outcomes"] = [
+            {
+                "component": "semantic_policy",
+                "outcome": "supported",
+                "summary": "Held-out semantic execution passed.",
+                "reusable": True,
+                "metrics": {"accuracy": 0.8},
+            },
+            {
+                "component": "legacy_exact_match",
+                "outcome": "not_diagnostic",
+                "summary": "The legacy target contains hidden randomness.",
+                "reason": "The target magnitude is absent from the prompt.",
+            },
+        ]
+        validate_record(stored, body=body, expected_kind="study")
+
+        stored["component_outcomes"][0]["outcome"] = "promising"
+        with self.assertRaisesRegex(ValueError, "component outcome"):
+            validate_record(stored, body=body, expected_kind="study")
+
     def test_study_identity_is_derived_from_path_and_git_commit_is_scoped(self) -> None:
         dataset = self.create_dataset()
         study = self.create_study(dataset["id"], study_id="path-derived")
