@@ -8,7 +8,12 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 from model_evolution.config import initialize_project
-from model_evolution.records import base_record, load_record, write_record
+from model_evolution.records import (
+    base_record,
+    load_document,
+    load_record,
+    write_record,
+)
 from model_evolution.storage import GCSArtifactStore, LocalArtifactStore
 from model_evolution.storage_plan import build_storage_plan, load_storage_plan
 from model_evolution.storage_publish import publish_storage
@@ -151,6 +156,74 @@ class StoragePlanTests(unittest.TestCase):
         )
         _, loaded = load_storage_plan(self.project)
         self.assertEqual(second, loaded)
+
+    def test_identical_artifact_aliases_share_one_object_and_all_update(self) -> None:
+        run, body = load_document(self.project, "run", "run-one")
+        run["results"]["primary"] = {
+            "status": "observed",
+            "artifact": {
+                "status": "local",
+                "path": "runs/tiny/best.pt",
+                "sha256": _file_sha(self.root / "runs/tiny/best.pt"),
+            },
+        }
+        write_record(
+            self.project,
+            "run",
+            run,
+            body=body,
+            replace_existing=True,
+        )
+
+        plan = build_storage_plan(self.project)
+        run_entry = next(
+            item for item in plan["artifacts"]
+            if item["object_path"] == "runs/run-one/best.pt"
+        )
+        self.assertEqual(
+            run_entry["artifact_paths"],
+            [["results", "primary", "artifact"], ["artifacts", "0"]],
+        )
+        self.assertEqual(plan["summary"]["objects"], 3)
+
+        publish_storage(
+            self.project,
+            store=LocalArtifactStore(self.root / ".remote"),
+            commit=False,
+        )
+        updated = load_record(self.project, "run", "run-one")
+        self.assertEqual(
+            updated["results"]["primary"]["artifact"]["status"], "available"
+        )
+        self.assertEqual(updated["artifacts"][0]["status"], "available")
+        self.assertEqual(
+            updated["results"]["primary"]["artifact"]["uri"],
+            updated["artifacts"][0]["uri"],
+        )
+
+    def test_conflicting_artifact_aliases_still_fail(self) -> None:
+        other = self.root / "runs/tiny/other.pt"
+        other.write_bytes(b"other")
+        run, body = load_document(self.project, "run", "run-one")
+        run["results"]["primary"] = {
+            "status": "observed",
+            "artifact": {
+                "status": "local",
+                "path": "runs/tiny/other.pt",
+                "object_name": "best.pt",
+                "sha256": _file_sha(other),
+            },
+        }
+        write_record(
+            self.project,
+            "run",
+            run,
+            body=body,
+            replace_existing=True,
+        )
+
+        with self.assertRaisesRegex(ValueError, "conflicting storage destination"):
+            build_storage_plan(self.project)
 
     def test_plan_detects_changed_artifact(self) -> None:
         build_storage_plan(self.project)

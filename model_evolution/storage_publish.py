@@ -72,6 +72,9 @@ def _publish_artifact(
             "record_id": artifact["record_id"],
             "record_kind": artifact["record_kind"],
             "artifact_path": artifact["artifact_path"],
+            "artifact_paths": artifact.get(
+                "artifact_paths", [artifact["artifact_path"]]
+            ),
             "object_path": artifact["object_path"],
             "uri": verified["uri"],
             "size": verified["size"],
@@ -104,6 +107,9 @@ def _publish_artifact(
         "record_id": artifact["record_id"],
         "record_kind": artifact["record_kind"],
         "artifact_path": artifact["artifact_path"],
+        "artifact_paths": artifact.get(
+            "artifact_paths", [artifact["artifact_path"]]
+        ),
         "object_path": artifact["object_path"],
         "uri": remote["uri"],
         "size": remote["size"],
@@ -127,7 +133,6 @@ def _update_records(
         record, body = load_document(project, kind, record_id)
         record_changed = False
         for item in items:
-            artifact = _artifact_at(record, list(item["artifact_path"]))
             published_fields = {
                 "status": "available",
                 "uri": item["uri"],
@@ -139,12 +144,17 @@ def _update_records(
                     "plan_sha256": plan["plan_sha256"],
                 },
             }
-            if any(
-                artifact.get(key) != value
-                for key, value in published_fields.items()
-            ):
-                artifact.update(published_fields)
-                record_changed = True
+            artifact_paths = item.get(
+                "artifact_paths", [item["artifact_path"]]
+            )
+            for artifact_path in artifact_paths:
+                artifact = _artifact_at(record, list(artifact_path))
+                if any(
+                    artifact.get(key) != value
+                    for key, value in published_fields.items()
+                ):
+                    artifact.update(published_fields)
+                    record_changed = True
         if record_changed:
             changed.append(
                 write_record(

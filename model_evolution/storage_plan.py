@@ -269,7 +269,7 @@ def build_storage_plan(
             if isinstance(item, dict)
     }
     entries: list[dict[str, Any]] = []
-    destinations: set[str] = set()
+    destinations: dict[str, dict[str, Any]] = {}
     cache_hits = 0
     cache_misses = 0
 
@@ -284,9 +284,23 @@ def build_storage_plan(
                     f"local artifact must be inside the repository: {source}"
                 ) from error
             destination = _object_path(kind, record, artifact)
-            if destination in destinations:
-                raise ValueError(f"duplicate storage destination: {destination}")
-            destinations.add(destination)
+            expected_source_digest = str(
+                artifact.get("tree_sha256" if kind == "dataset" else "sha256", "")
+            )
+            existing = destinations.get(destination)
+            if existing is not None:
+                same_artifact = (
+                    existing["record_id"] == str(record["id"])
+                    and existing["record_kind"] == kind
+                    and existing["source_path"] == relative_source.as_posix()
+                    and existing["source_digest"] == expected_source_digest
+                )
+                if not same_artifact:
+                    raise ValueError(
+                        f"conflicting storage destination: {destination}"
+                    )
+                existing["artifact_paths"].append(list(trail))
+                continue
 
             if kind == "dataset":
                 expected_tree = str(artifact.get("tree_sha256", ""))
@@ -405,28 +419,29 @@ def build_storage_plan(
                 upload_sha256 = str(cached["sha256"])
                 source_digest = expected
 
-            entries.append(
-                {
-                    "record_id": str(record["id"]),
-                    "record_kind": kind,
-                    "role": ".".join(trail),
-                    "artifact_path": list(trail),
-                    "source_path": relative_source.as_posix(),
-                    "source_digest": source_digest,
-                    "upload_path": upload_source.relative_to(project.root).as_posix(),
-                    "object_path": destination,
-                    "logical_files": logical_files,
-                    "source_bytes": source_bytes,
-                    "size": upload_size,
-                    "sha256": upload_sha256,
-                    "content_type": (
-                        "application/zstd"
-                        if kind == "dataset"
-                        else mimetypes.guess_type(upload_source.name)[0]
-                        or "application/octet-stream"
-                    ),
-                }
-            )
+            entry = {
+                "record_id": str(record["id"]),
+                "record_kind": kind,
+                "role": ".".join(trail),
+                "artifact_path": list(trail),
+                "artifact_paths": [list(trail)],
+                "source_path": relative_source.as_posix(),
+                "source_digest": source_digest,
+                "upload_path": upload_source.relative_to(project.root).as_posix(),
+                "object_path": destination,
+                "logical_files": logical_files,
+                "source_bytes": source_bytes,
+                "size": upload_size,
+                "sha256": upload_sha256,
+                "content_type": (
+                    "application/zstd"
+                    if kind == "dataset"
+                    else mimetypes.guess_type(upload_source.name)[0]
+                    or "application/octet-stream"
+                ),
+            }
+            entries.append(entry)
+            destinations[destination] = entry
 
     entries.sort(key=lambda item: item["object_path"])
     identity = {
