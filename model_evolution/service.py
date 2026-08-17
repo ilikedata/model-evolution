@@ -150,6 +150,10 @@ class ModelEvolution:
         design = study["design"]
         if not isinstance(design, dict):
             raise ValueError("study design must be a mapping")
+        if design.get("experiment_mode") in {"proof", "scaled"} and not design[
+            "preflight"
+        ]["tiny_overfit"]["passed"]:
+            raise ValueError("training experiment preflight must pass before planning")
         dataset_id = str(design.get("dataset_id", ""))
         config_path = design.get("config")
         if not dataset_id or not config_path:

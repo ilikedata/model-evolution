@@ -140,6 +140,8 @@ class ProjectCase(unittest.TestCase):
         *,
         study_id: str = "metric-study",
         inherited_modules: list[dict[str, str]] | None = None,
+        experiment_mode: str | None = None,
+        preflight: dict | None = None,
     ) -> dict:
         front = {
             "status": "planned",
@@ -150,6 +152,10 @@ class ProjectCase(unittest.TestCase):
                 "inherited_modules": inherited_modules or [],
             },
         }
+        if experiment_mode is not None:
+            front["design"]["experiment_mode"] = experiment_mode
+        if preflight is not None:
+            front["design"]["preflight"] = preflight
         write_markdown(
             self.project.records_dir / "studies" / f"{study_id}.md",
             front,
@@ -269,6 +275,34 @@ class RegistryTests(ProjectCase):
             {record["id"] for record in lineage["records"]},
             {run["id"], dataset["id"], study["id"]},
         )
+
+    def test_new_training_experiments_require_a_passing_scientific_preflight(self) -> None:
+        dataset = self.create_dataset()
+        preflight = {
+            "real_data_audited": True,
+            "label_distribution": {"positive": 16, "negative": 16},
+            "trivial_baseline": {"accuracy": 0.5},
+            "tiny_overfit": {"records": 32, "passed": False},
+            "focused_verification": "python -m unittest tests.test_metric_training",
+        }
+        study = self.create_study(
+            dataset["id"], experiment_mode="proof", preflight=preflight
+        )
+
+        with self.assertRaisesRegex(ValueError, "preflight must pass"):
+            self.service.plan_run(
+                "blocked-proof", study_id=study["id"], adapter=ADAPTER_NAME
+            )
+
+        study_path = self.project.records_dir / "studies" / f"{study['id']}.md"
+        front, body = load_document(self.project, "study", study["id"])
+        front["design"]["preflight"]["tiny_overfit"]["passed"] = True
+        write_markdown(study_path, front, body)
+
+        run = self.service.plan_run(
+            "ready-proof", study_id=study["id"], adapter=ADAPTER_NAME
+        )
+        self.assertEqual("planned", run["status"])
 
     def test_source_changes_block_run_planning(self) -> None:
         dataset = self.create_dataset()

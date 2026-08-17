@@ -120,6 +120,32 @@ partial success explicit and identify which checkpoint components may be
 legitimate parents for later studies. Prefer these evidence-bound terms over
 the subjective label `promising`.
 
+## Scientific preflight for new training experiments
+
+New training studies declare `design.experiment_mode` as `proof` or `scaled`
+and record a compact `design.preflight` containing a real-data audit, observed
+label distribution, trivial baseline, tiny-real-data overfit result, and the
+focused verification command. Model Evolution refuses to plan the run until
+the tiny overfit has passed. Existing historical studies without an experiment
+mode remain valid.
+
+This preflight tests whether the learning problem is coherent before consuming
+meaningful compute. It does not replace held-out evaluation and must not become
+a large approval workflow. A completed but unsuccessful component should be
+recorded with `component_outcomes[].reusable: false` rather than published as a
+valid parent merely because its process exited successfully.
+
+```yaml
+design:
+  experiment_mode: proof
+  preflight:
+    real_data_audited: true
+    label_distribution: {positive: 16, negative: 16}
+    trivial_baseline: {accuracy: 0.5}
+    tiny_overfit: {records: 32, passed: true}
+    focused_verification: python -m unittest tests.test_visual_progress
+```
+
 ## Runs, modules, and assessments
 
 Plan and execute a run from the study's design:

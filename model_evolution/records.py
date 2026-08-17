@@ -146,6 +146,7 @@ def _validate_study(record: dict[str, Any], body: str) -> None:
             raise ValueError("study design requires dataset_id")
         if not isinstance(design.get("config"), str) or not design["config"]:
             raise ValueError("study design requires config")
+        _validate_experiment_preflight(design)
         inherited = design.get("inherited_modules", [])
         if not isinstance(inherited, list):
             raise ValueError("study inherited_modules must be a list")
@@ -169,6 +170,33 @@ def _validate_study(record: dict[str, Any], body: str) -> None:
     missing = sorted(required - _headings(body))
     if missing:
         raise ValueError("study missing Markdown sections: " + ", ".join(missing))
+
+
+def _validate_experiment_preflight(design: dict[str, Any]) -> None:
+    mode = design.get("experiment_mode")
+    if mode is None:
+        return
+    if mode not in {"proof", "scaled"}:
+        raise ValueError("study experiment_mode must be proof or scaled")
+    preflight = design.get("preflight")
+    if not isinstance(preflight, dict):
+        raise ValueError("training experiment requires a preflight mapping")
+    if preflight.get("real_data_audited") is not True:
+        raise ValueError("training preflight requires a real-data audit")
+    for field in ("label_distribution", "trivial_baseline"):
+        if not isinstance(preflight.get(field), dict) or not preflight[field]:
+            raise ValueError(f"training preflight requires {field}")
+    tiny = preflight.get("tiny_overfit")
+    if not isinstance(tiny, dict):
+        raise ValueError("training preflight requires tiny_overfit evidence")
+    if not isinstance(tiny.get("records"), int) or tiny["records"] < 1:
+        raise ValueError("training preflight tiny_overfit requires records")
+    if not isinstance(tiny.get("passed"), bool):
+        raise ValueError("training preflight tiny_overfit requires passed")
+    if not isinstance(preflight.get("focused_verification"), str) or not preflight[
+        "focused_verification"
+    ].strip():
+        raise ValueError("training preflight requires focused_verification")
 
 
 def _validate_component_outcomes(record: dict[str, Any]) -> None:
