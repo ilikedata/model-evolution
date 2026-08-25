@@ -4,6 +4,11 @@ All notable user-facing changes are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Top-level adapter SDK helpers for records, Git guards, timestamps, downloads,
+  and uploads.
+
 ## [0.1.0] - 2026-08-25
 
 ### Added

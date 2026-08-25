@@ -44,9 +44,17 @@ class AdapterContractTests(unittest.TestCase):
                 "ModelEvolution",
                 "ProjectAdapter",
                 "ProjectConfig",
+                "download_tree",
                 "initialize_project",
+                "load_record",
                 "load_project",
                 "new_id",
+                "now",
+                "record_path",
+                "require_clean_source",
+                "require_committed_file",
+                "upload_file",
+                "upload_tree",
             },
         )
 

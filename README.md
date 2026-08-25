@@ -106,13 +106,23 @@ The initial supported Python interface is exported from `model_evolution`:
 - `ModelEvolution`
 - `ProjectAdapter`
 - `ProjectConfig`
+- `download_tree`
 - `initialize_project`
+- `load_record`
 - `load_project`
 - `new_id`
+- `now`
+- `record_path`
+- `require_clean_source`
+- `require_committed_file`
+- `upload_file`
+- `upload_tree`
 
 The CLI, schema-v2 record layout, and adapter entry-point group
 `model_evolution.adapters` are also compatibility surfaces. Other module paths
-remain provisional during the `0.x` series.
+remain provisional during the `0.x` series. The additional top-level helpers
+are the supported adapter SDK; projects should import them from
+`model_evolution`, not their implementation modules.
 
 See [the user guide](docs/model-evolution.md) and
 [schema-v2 design](docs/model-evolution-v2.md) for the complete lifecycle.
