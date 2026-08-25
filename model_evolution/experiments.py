@@ -11,12 +11,20 @@ from .records import iter_records, load_record, record_path
 from .service import ModelEvolution
 
 
+def _experiment_id(value: str) -> str:
+    path = Path(value)
+    if not value or path.parent != Path(".") or value in {".", ".."}:
+        raise ValueError("experiment_id must be a plain record ID, not a path")
+    return value
+
+
 def load_experiment(
     experiment_id: str,
     *,
     root: str | Path = ".",
 ) -> dict[str, Any]:
     """Load an experiment definition and all of its execution attempts."""
+    experiment_id = _experiment_id(experiment_id)
     project = load_project(root)
     definition = load_record(project, "study", experiment_id)
     runs = [
@@ -55,6 +63,7 @@ def execute_experiment(
     commit: bool = True,
 ) -> dict[str, Any]:
     """Plan and execute an internal run with the project-configured adapter."""
+    experiment_id = _experiment_id(experiment_id)
     if not commit:
         raise ValueError("experiment execution requires committed lifecycle records")
     project = load_project(root)
@@ -77,6 +86,7 @@ def conclude_experiment(
     commit: bool = True,
 ) -> dict[str, Any]:
     """Validate and commit the conclusion authored in an experiment definition."""
+    experiment_id = _experiment_id(experiment_id)
     project = load_project(root)
     service = ModelEvolution(project, actor=actor, commit=commit)
     service.commit_study(

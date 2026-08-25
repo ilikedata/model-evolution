@@ -234,6 +234,10 @@ Retain the result.
         experiment = model_evolution.load_experiment(self.experiment_id, root=self.root)
         self.assertEqual(experiment["runs"], [])
 
+    def test_experiment_id_cannot_escape_the_records_directory(self) -> None:
+        with self.assertRaisesRegex(ValueError, "plain record ID"):
+            model_evolution.load_experiment("../outside", root=self.root)
+
 
 if __name__ == "__main__":
     unittest.main()
