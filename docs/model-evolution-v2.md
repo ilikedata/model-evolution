@@ -26,9 +26,9 @@ Unavailable facts remain explicit:
 - recoverable repository artifacts use checksummed local references; and
 - no current artifact may substitute for a missing recorded digest.
 
-The Latent Arborist registry contains research-intent studies, every discovered
-dataset and completed run, a module for every successful checkpoint, embedded
-run results, and explicit unavailable records for lost data and weights.
+A complete registry contains research-intent studies, every discovered dataset
+and completed run, a module for every successful checkpoint, embedded run
+results, and explicit unavailable records for lost data and weights.
 
 ## Artifact lifecycle
 

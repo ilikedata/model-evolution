@@ -4,7 +4,6 @@ from collections import Counter
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
-import os
 from pathlib import Path
 import re
 import subprocess

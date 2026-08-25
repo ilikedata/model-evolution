@@ -1,9 +1,10 @@
 # Model Evolution
 
-Model Evolution is the Markdown-first research provenance and artifact-lineage
-layer used by Latent Arborist. Git is authoritative for research intent,
-reasoning, summaries, and lineage. GCS is authoritative for immutable datasets,
-weights, complete metrics, and reports after publication.
+Model Evolution is a Markdown-first research provenance and artifact-lineage
+tool for model-development projects. Git is authoritative for research intent,
+reasoning, summaries, and lineage. The configured artifact store is
+authoritative for immutable datasets, weights, complete metrics, and reports
+after publication.
 
 ## Records
 
@@ -72,7 +73,7 @@ The controlled comparison to execute.
 Validate and commit the plan:
 
 ```bash
-make research-plan STUDY=model-evolution/studies/<study-id>.md
+model-evolution study plan model-evolution/studies/<study-id>.md
 ```
 
 Study states are `draft`, `planned`, `active`, `concluded`, and `cancelled`.
@@ -80,7 +81,7 @@ Concluded studies add structured outcome, confidence, and evidence in front
 matter plus `Observations`, `Conclusion`, and `Next action` sections:
 
 ```bash
-make research-conclude STUDY=model-evolution/studies/<study-id>.md
+model-evolution study conclude model-evolution/studies/<study-id>.md
 ```
 
 ## Component outcomes
@@ -151,8 +152,8 @@ design:
 Plan and execute a run from the study's design:
 
 ```bash
-make research-run-plan RUN_SLUG=<slug> STUDY_ID=<study-id>
-make research-run RUN_ID=<run-id>
+model-evolution run plan --slug <slug> --study <study-id> --adapter <run-adapter>
+model-evolution run execute <run-id>
 ```
 
 The run snapshots the tracked config digest, source revision, dataset,
@@ -167,13 +168,13 @@ preserve dependencies whose exact artifact cannot be recovered.
 Use an assessment only when evaluation is later or independently versioned:
 
 ```bash
-make research-assess \
-  RUN_ID=<run-id> \
-  DATASET_ID=<dataset-id> \
-  REPORT=<report.json> \
-  EVALUATOR=<name> \
-  EVALUATOR_VERSION=<version> \
-  PURPOSE="<reason>"
+model-evolution assessment record \
+  --run <run-id> \
+  --dataset <dataset-id> \
+  --report <report.json> \
+  --evaluator <name> \
+  --evaluator-version <version> \
+  --purpose "<reason>"
 ```
 
 ## Availability
@@ -207,8 +208,8 @@ Codex sessions are one evidence source, not a record type. Collect and validate
 only sessions whose working directory exactly matches this repository:
 
 ```bash
-make research-evidence-codex
-make research-evidence-validate
+model-evolution evidence codex-sessions
+model-evolution evidence validate
 ```
 
 Normalized evidence lives under `.model-evolution/work/evidence/codex`. The
@@ -223,7 +224,7 @@ and assessments.
 The routine interface is one command:
 
 ```bash
-make research-publish
+model-evolution storage publish
 ```
 
 It validates the registry, builds the deterministic storage plan, packages
@@ -254,9 +255,9 @@ skips unchanged file hashing, and checks GCS metadata before reading any local
 upload bytes. Cache entries invalidate independently when a source file,
 package, expected digest, or packaging version changes.
 
-`make research-storage-plan` remains available as a non-publishing diagnostic.
-Use `STORAGE_REBUILD=1 make research-publish` only for a deliberate full
-rehash and repackaging audit.
+`model-evolution storage plan` remains available as a non-publishing
+diagnostic. Use `model-evolution storage publish --rebuild` only for a
+deliberate full rehash and repackaging audit.
 
 ## Authentication and routine commands
 
@@ -264,16 +265,16 @@ Set actor identity and the credential path in the process environment:
 
 ```bash
 export MODEL_EVOLUTION_ACTOR="agent-name"
-export GOOGLE_APPLICATION_CREDENTIALS="$HOME/Downloads/latent-arborist-017d179c5642.json"
+export GOOGLE_APPLICATION_CREDENTIALS="/secure/path/to/service-account.json"
 ```
 
 Never inspect, print, copy, or commit the credential file.
 
 ```bash
-make research-validate
-make research-status
-make research-lineage RECORD_ID=<record-id>
-make research-publish
+model-evolution validate
+model-evolution status
+model-evolution lineage <record-id>
+model-evolution storage publish
 ```
 
 Launches reject uncommitted source or configuration changes. Each lifecycle
