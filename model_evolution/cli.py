@@ -16,9 +16,6 @@ from .storage import upload_file
 from .storage_plan import build_storage_plan
 from .storage_publish import publish_storage
 
-LATENT_ARBORIST_METRIC_ADAPTER = "latent-arborist.metric"
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="model-evolution")
     parser.add_argument("--root", default=".", help="project directory")
@@ -58,7 +55,7 @@ def _parser() -> argparse.ArgumentParser:
     run_plan = run_commands.add_parser("plan")
     run_plan.add_argument("--slug", required=True)
     run_plan.add_argument("--study", required=True)
-    run_plan.add_argument("--adapter", default=LATENT_ARBORIST_METRIC_ADAPTER)
+    run_plan.add_argument("--adapter", required=True)
     run_execute = run_commands.add_parser("execute")
     run_execute.add_argument("run_id")
     run_execute.add_argument("--epochs-this-run", type=int)
