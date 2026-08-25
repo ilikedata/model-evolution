@@ -44,12 +44,16 @@ class AdapterContractTests(unittest.TestCase):
                 "ModelEvolution",
                 "ProjectAdapter",
                 "ProjectConfig",
+                "conclude_experiment",
                 "download_tree",
+                "execute_experiment",
                 "initialize_project",
+                "load_experiment",
                 "load_record",
                 "load_project",
                 "new_id",
                 "now",
+                "plan_experiment",
                 "record_path",
                 "require_clean_source",
                 "require_committed_file",
@@ -80,6 +84,24 @@ class AdapterContractTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
                 parser.parse_args(["run", "plan", "--slug", "run", "--study", "study"])
+
+    def test_experiment_lifecycle_uses_one_id_and_no_adapter_argument(self) -> None:
+        parser = _parser()
+
+        planned = parser.parse_args(["experiment", "plan", "definition.md"])
+        self.assertEqual((planned.experiment_command, planned.path), ("plan", "definition.md"))
+
+        for command in ("run", "conclude", "show"):
+            parsed = parser.parse_args(["experiment", command, "experiment-one"])
+            self.assertEqual(parsed.experiment_command, command)
+            self.assertEqual(parsed.experiment_id, "experiment-one")
+            self.assertFalse(hasattr(parsed, "adapter"))
+
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                parser.parse_args(
+                    ["experiment", "run", "experiment-one", "--adapter", "example"]
+                )
 
 
 if __name__ == "__main__":

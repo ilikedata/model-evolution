@@ -7,6 +7,12 @@ import sys
 from typing import Any
 
 from .evidence import extract_codex_sessions, validate_evidence_bundle
+from .experiments import (
+    conclude_experiment,
+    execute_experiment,
+    load_experiment,
+    plan_experiment,
+)
 from .config import initialize_project, load_project
 from .gitops import commit_paths
 from .ids import new_id
@@ -30,6 +36,19 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--adapter", required=True)
 
     commands.add_parser("validate", help="validate all project records and references")
+
+    experiment = commands.add_parser("experiment", help="manage one experiment lifecycle")
+    experiment_commands = experiment.add_subparsers(
+        dest="experiment_command", required=True
+    )
+    experiment_plan = experiment_commands.add_parser("plan")
+    experiment_plan.add_argument("path")
+    experiment_run = experiment_commands.add_parser("run")
+    experiment_run.add_argument("experiment_id")
+    experiment_conclude = experiment_commands.add_parser("conclude")
+    experiment_conclude.add_argument("experiment_id")
+    experiment_show = experiment_commands.add_parser("show")
+    experiment_show.add_argument("experiment_id")
 
     study = commands.add_parser("study", help="validate and commit canonical study documents")
     study_commands = study.add_subparsers(dest="study_command", required=True)
@@ -204,6 +223,20 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
                 f"research: initialize Model Evolution for {project.project_id}",
             )
         return {"id": project.project_id, "kind": "project", "status": "initialized"}
+
+    if args.command == "experiment":
+        options = {
+            "root": args.root,
+            "actor": args.actor,
+            "commit": not args.no_commit,
+        }
+        if args.experiment_command == "plan":
+            return plan_experiment(args.path, **options)
+        if args.experiment_command == "run":
+            return execute_experiment(args.experiment_id, **options)
+        if args.experiment_command == "conclude":
+            return conclude_experiment(args.experiment_id, **options)
+        return load_experiment(args.experiment_id, root=args.root)
 
     service = _service(args)
     if args.command == "validate":
