@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from model_evolution.adapters.latent_arborist import ADAPTER_NAME, execute_metric_run
+from latent_arborist.research_adapter import ADAPTER_NAME, execute_metric_run
 from model_evolution.config import initialize_project, load_project
 from model_evolution.ids import new_id, observed_id
 from model_evolution.records import (
@@ -338,16 +338,16 @@ class RegistryTests(ProjectCase):
 
         with (
             patch(
-                "model_evolution.adapters.latent_arborist._download_dataset",
+                "latent_arborist.research_adapter._download_dataset",
                 return_value=self.root / "dataset",
             ),
             patch(
-                "model_evolution.adapters.latent_arborist._prepare_cache",
+                "latent_arborist.research_adapter._prepare_cache",
                 return_value=self.root / "cache",
             ),
-            patch("model_evolution.adapters.latent_arborist.train_metric", side_effect=fake_train),
+            patch("latent_arborist.research_adapter.train_metric", side_effect=fake_train),
             patch(
-                "model_evolution.adapters.latent_arborist.evaluate_checkpoint",
+                "latent_arborist.research_adapter.evaluate_checkpoint",
                 side_effect=fake_evaluate,
             ),
         ):
@@ -374,14 +374,14 @@ class RegistryTests(ProjectCase):
 
         with (
             patch(
-                "model_evolution.adapters.latent_arborist._download_dataset",
+                "latent_arborist.research_adapter._download_dataset",
                 return_value=self.root / "dataset",
             ),
             patch(
-                "model_evolution.adapters.latent_arborist._prepare_cache",
+                "latent_arborist.research_adapter._prepare_cache",
                 return_value=self.root / "cache",
             ),
-            patch("model_evolution.adapters.latent_arborist.train_metric", side_effect=failing_train),
+            patch("latent_arborist.research_adapter.train_metric", side_effect=failing_train),
         ):
             with self.assertRaisesRegex(RuntimeError, "training failed"):
                 execute_metric_run(self.service, run["id"])

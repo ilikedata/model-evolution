@@ -8,7 +8,7 @@ import unittest
 
 import torch
 
-from model_evolution.adapters.latent_arborist import inspect_checkpoint_metadata
+from latent_arborist.research_adapter import inspect_checkpoint_metadata
 from model_evolution.evidence import (
     extract_codex_sessions,
     redact_secrets,
@@ -272,7 +272,7 @@ class EvidenceSchemaTests(unittest.TestCase):
 
     def test_tensorboard_inspection_records_terminal_scalars(self) -> None:
         from torch.utils.tensorboard import SummaryWriter
-        from model_evolution.adapters.latent_arborist import inspect_tensorboard_metadata
+        from latent_arborist.research_adapter import inspect_tensorboard_metadata
 
         with tempfile.TemporaryDirectory() as directory:
             writer = SummaryWriter(directory)
