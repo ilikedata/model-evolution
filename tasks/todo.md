@@ -4,8 +4,8 @@
 
 **Acceptance criteria:**
 
-- [ ] The four CLI commands and four Python functions are documented.
-- [ ] The experiment-to-study/run mapping and compatibility guarantees are explicit.
+- [x] The four CLI commands and four Python functions are documented.
+- [x] The experiment-to-study/run mapping and compatibility guarantees are explicit.
 
 **Verification:** Review rendered Markdown and run the documentation examples through CLI tests.
 
@@ -13,8 +13,8 @@
 
 **Acceptance criteria:**
 
-- [ ] Public exports include all four experiment functions.
-- [ ] Tests cover plan, run, conclude, load/show, configured adapter selection, and legacy CLI compatibility.
+- [x] Public exports include all four experiment functions.
+- [x] Tests cover plan, run, conclude, load/show, configured adapter selection, and legacy CLI compatibility.
 
 **Verification:** Focused tests fail because the new interface does not yet exist.
 
@@ -22,9 +22,9 @@
 
 **Acceptance criteria:**
 
-- [ ] New functions compose existing records without schema changes.
-- [ ] New CLI commands call the shared public functions without `--adapter`.
-- [ ] Existing commands and tests still pass.
+- [x] New functions compose existing records without schema changes.
+- [x] New CLI commands call the shared public functions without `--adapter`.
+- [x] Existing commands and tests still pass.
 
 **Verification:** Focused tests and `make check` pass.
 
@@ -32,9 +32,9 @@
 
 **Acceptance criteria:**
 
-- [ ] Wheel and source distribution build successfully.
-- [ ] The wheel installs into an isolated environment.
-- [ ] Installed Python imports and CLI command parsing work.
+- [x] Wheel and source distribution build successfully.
+- [x] The wheel installs into an isolated environment.
+- [x] Installed Python imports and CLI command parsing work.
 
 **Verification:** `make build` plus isolated installed-artifact smoke tests pass.
 
@@ -42,8 +42,8 @@
 
 **Acceptance criteria:**
 
-- [ ] Five-axis review has no unresolved required findings.
-- [ ] Focused commits contain no unrelated changes or secrets.
-- [ ] Commits are pushed to the existing private repository without tags or releases.
+- [x] Five-axis review has no unresolved required findings.
+- [x] Focused commits contain no unrelated changes or secrets.
+- [x] Commits are pushed to the existing private repository without tags or releases.
 
 **Verification:** Clean worktree and remote branch contains the new commits.
