@@ -143,6 +143,20 @@ functions from `model_evolution`, not their implementation modules.
 See [the user guide](docs/model-evolution.md) and
 [schema-v2 design](docs/model-evolution-v2.md) for the complete lifecycle.
 
+## Codex experiment workflow
+
+This repository includes the standalone
+[`manage-model-evolution-experiments`](skills/manage-model-evolution-experiments/SKILL.md)
+skill for projects that use Model Evolution. It has two separate modes:
+
+- plan one focused experiment and hand its exact execution command to the
+  repository owner; or
+- conclude an experiment from evidence the owner has already produced.
+
+The skill never executes experiments, training, evaluation, or dataset
+generation. It is maintained in this repository but is installed separately
+from the Python package.
+
 ## Development
 
 ```bash

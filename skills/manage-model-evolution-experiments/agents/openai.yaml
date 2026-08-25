@@ -1,0 +1,4 @@
+interface:
+  display_name: "Model Evolution Experiments"
+  short_description: "Plan and conclude tracked research experiments"
+  default_prompt: "Use $manage-model-evolution-experiments to plan a focused research experiment without executing it."
