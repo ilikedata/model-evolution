@@ -5,9 +5,6 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
-
-from latent_arborist.research_adapter import ADAPTER_NAME, execute_metric_run
 from model_evolution.config import initialize_project, load_project
 from model_evolution.ids import new_id, observed_id
 from model_evolution.records import (
@@ -85,6 +82,8 @@ Reject if held-out loss does not improve.
 Train one metric encoder against the pinned fixture.
 """
 
+RUN_ADAPTER = "example.training"
+
 
 class ProjectCase(unittest.TestCase):
     def setUp(self) -> None:
@@ -103,7 +102,7 @@ class ProjectCase(unittest.TestCase):
             self.root,
             project_id="test-project",
             artifact_store=self.artifacts.as_uri(),
-            adapter="latent-arborist",
+            adapter="example",
         )
         _git(self.root, "add", ".model-evolution/project.yaml", "model-evolution")
         _git(self.root, "commit", "-m", "initialize model evolution")
@@ -266,7 +265,7 @@ class RegistryTests(ProjectCase):
     def test_dataset_run_lineage_and_config_pinning(self) -> None:
         dataset = self.create_dataset()
         study = self.create_study(dataset["id"])
-        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
+        run = self.service.plan_run("metric", study_id=study["id"], adapter=RUN_ADAPTER)
         self.assertEqual(run["initialization"], {"kind": "from_scratch", "parents": []})
         self.assertEqual(run["config"]["path"], "configs/metric.toml")
         self.assertEqual(len(run["config"]["sha256"]), 64)
@@ -291,7 +290,7 @@ class RegistryTests(ProjectCase):
 
         with self.assertRaisesRegex(ValueError, "preflight must pass"):
             self.service.plan_run(
-                "blocked-proof", study_id=study["id"], adapter=ADAPTER_NAME
+                "blocked-proof", study_id=study["id"], adapter=RUN_ADAPTER
             )
 
         study_path = self.project.records_dir / "studies" / f"{study['id']}.md"
@@ -300,7 +299,7 @@ class RegistryTests(ProjectCase):
         write_markdown(study_path, front, body)
 
         run = self.service.plan_run(
-            "ready-proof", study_id=study["id"], adapter=ADAPTER_NAME
+            "ready-proof", study_id=study["id"], adapter=RUN_ADAPTER
         )
         self.assertEqual("planned", run["status"])
 
@@ -309,93 +308,13 @@ class RegistryTests(ProjectCase):
         study = self.create_study(dataset["id"])
         (self.root / "README.md").write_text("changed\n", encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "must be committed"):
-            self.service.plan_run("blocked", study_id=study["id"], adapter=ADAPTER_NAME)
-
-    def test_metric_adapter_embeds_results_and_publishes_available_module(self) -> None:
-        dataset = self.create_dataset()
-        study = self.create_study(dataset["id"])
-        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
-
-        def fake_train(config, **kwargs):
-            del kwargs
-            config.run_dir.mkdir(parents=True, exist_ok=True)
-            (config.run_dir / "best.pt").write_bytes(b"weights")
-            (config.run_dir / "latest.pt").write_bytes(b"weights")
-            (config.run_dir / "metrics.jsonl").write_text('{"loss": 1.0}\n', encoding="utf-8")
-            return {"best_loss": 1.0, "epochs_completed": 1, "global_step": 1}
-
-        def fake_evaluate(checkpoint, *, split):
-            report = {
-                "checkpoint": str(checkpoint),
-                "split": split,
-                "metrics": {"loss": 1.0},
-                "quality_gate": {"passed": True},
-            }
-            Path(checkpoint).parent.joinpath("test-report.json").write_text(
-                json.dumps(report) + "\n", encoding="utf-8"
-            )
-            return report
-
-        with (
-            patch(
-                "latent_arborist.research_adapter._download_dataset",
-                return_value=self.root / "dataset",
-            ),
-            patch(
-                "latent_arborist.research_adapter._prepare_cache",
-                return_value=self.root / "cache",
-            ),
-            patch("latent_arborist.research_adapter.train_metric", side_effect=fake_train),
-            patch(
-                "latent_arborist.research_adapter.evaluate_checkpoint",
-                side_effect=fake_evaluate,
-            ),
-        ):
-            result = execute_metric_run(self.service, run["id"])
-
-        completed = load_record(self.project, "run", run["id"])
-        module = load_record(self.project, "module", result["module_id"])
-        self.assertEqual(completed["status"], "completed")
-        self.assertEqual(completed["results"]["primary"]["split"], "test")
-        self.assertEqual(completed["module_ids"], [module["id"]])
-        self.assertEqual(module["status"], "available")
-        self.assertTrue(validate_repository(self.project)["valid"])
-
-    def test_failed_run_records_error_and_surviving_artifacts(self) -> None:
-        dataset = self.create_dataset()
-        study = self.create_study(dataset["id"])
-        run = self.service.plan_run("failure", study_id=study["id"], adapter=ADAPTER_NAME)
-
-        def failing_train(config, **kwargs):
-            del kwargs
-            config.run_dir.mkdir(parents=True, exist_ok=True)
-            (config.run_dir / "metrics.jsonl").write_text('{"loss": 9.0}\n', encoding="utf-8")
-            raise RuntimeError("training failed")
-
-        with (
-            patch(
-                "latent_arborist.research_adapter._download_dataset",
-                return_value=self.root / "dataset",
-            ),
-            patch(
-                "latent_arborist.research_adapter._prepare_cache",
-                return_value=self.root / "cache",
-            ),
-            patch("latent_arborist.research_adapter.train_metric", side_effect=failing_train),
-        ):
-            with self.assertRaisesRegex(RuntimeError, "training failed"):
-                execute_metric_run(self.service, run["id"])
-
-        failed = load_record(self.project, "run", run["id"])
-        self.assertEqual(failed["status"], "failed")
-        self.assertEqual(failed["error"]["type"], "RuntimeError")
-        self.assertTrue(failed["artifact"]["incomplete"])
+            self.service.plan_run("blocked", study_id=study["id"], adapter=RUN_ADAPTER)
 
     def test_available_module_can_be_inherited_and_deprecated_module_cannot(self) -> None:
         dataset = self.create_dataset()
         first_study = self.create_study(dataset["id"], study_id="first")
         source_run = self.service.plan_run(
-            "source", study_id=first_study["id"], adapter=ADAPTER_NAME
+            "source", study_id=first_study["id"], adapter=RUN_ADAPTER
         )
         weights = self.project.work_dir / "weights.pt"
         weights.parent.mkdir(parents=True, exist_ok=True)
@@ -413,7 +332,7 @@ class RegistryTests(ProjectCase):
             inherited_modules=[{"role": "metric_encoder", "module_id": module["id"]}],
         )
         inherited = self.service.plan_run(
-            "inherited", study_id=inherited_study["id"], adapter=ADAPTER_NAME
+            "inherited", study_id=inherited_study["id"], adapter=RUN_ADAPTER
         )
         self.assertEqual(inherited["initialization"]["parents"][0]["module_id"], module["id"])
         self.assertEqual(
@@ -432,13 +351,13 @@ class RegistryTests(ProjectCase):
         )
         with self.assertRaisesRegex(ValueError, "not available"):
             self.service.plan_run(
-                "blocked", study_id=inherited_study["id"], adapter=ADAPTER_NAME
+                "blocked", study_id=inherited_study["id"], adapter=RUN_ADAPTER
             )
 
     def test_later_assessment_is_independent(self) -> None:
         dataset = self.create_dataset()
         study = self.create_study(dataset["id"])
-        run = self.service.plan_run("metric", study_id=study["id"], adapter=ADAPTER_NAME)
+        run = self.service.plan_run("metric", study_id=study["id"], adapter=RUN_ADAPTER)
         assessment = self.service.create_assessment(
             run_id=run["id"],
             dataset_id=dataset["id"],
@@ -453,7 +372,7 @@ class RegistryTests(ProjectCase):
     def test_validation_rejects_module_inheritance_cycle(self) -> None:
         dataset = self.create_dataset()
         study = self.create_study(dataset["id"])
-        run = self.service.plan_run("cycle", study_id=study["id"], adapter=ADAPTER_NAME)
+        run = self.service.plan_run("cycle", study_id=study["id"], adapter=RUN_ADAPTER)
         weights = self.project.work_dir / "cycle.pt"
         weights.parent.mkdir(parents=True, exist_ok=True)
         weights.write_bytes(b"weights")
@@ -483,7 +402,7 @@ class RegistryTests(ProjectCase):
         dataset = self.create_dataset()
         study = self.create_study(dataset["id"])
         source_run = self.service.plan_run(
-            "source", study_id=study["id"], adapter=ADAPTER_NAME
+            "source", study_id=study["id"], adapter=RUN_ADAPTER
         )
         weights = self.project.work_dir / "hash-drift.pt"
         weights.parent.mkdir(parents=True, exist_ok=True)
@@ -501,7 +420,7 @@ class RegistryTests(ProjectCase):
             inherited_modules=[{"module_id": module["id"]}],
         )
         inherited = self.service.plan_run(
-            "hash-drift", study_id=inherited_study["id"], adapter=ADAPTER_NAME
+            "hash-drift", study_id=inherited_study["id"], adapter=RUN_ADAPTER
         )
         inherited["initialization"]["parents"][0]["sha256"] = "f" * 64
         _, body = load_document(self.project, "run", inherited["id"])

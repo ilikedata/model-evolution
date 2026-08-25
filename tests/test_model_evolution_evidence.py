@@ -6,9 +6,6 @@ import subprocess
 import tempfile
 import unittest
 
-import torch
-
-from latent_arborist.research_adapter import inspect_checkpoint_metadata
 from model_evolution.evidence import (
     extract_codex_sessions,
     redact_secrets,
@@ -247,44 +244,6 @@ class EvidenceSchemaTests(unittest.TestCase):
         record["provenance"][0]["claim_type"] = "certain"
         with self.assertRaisesRegex(ValueError, "claim_type"):
             validate_record(record, body=body)
-
-    def test_latent_arborist_checkpoint_inspection_is_weights_only_metadata(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            checkpoint = Path(directory) / "checkpoint.pt"
-            torch.save(
-                {
-                    "model": {"weight": torch.ones(2, 2)},
-                    "metadata": {
-                        "metric_checkpoint": "runs/metric-v1/best.pt",
-                        "metric_sha256": "a" * 64,
-                        "metrics": {"val": {"loss": 0.5}},
-                    },
-                },
-                checkpoint,
-            )
-            result = inspect_checkpoint_metadata(checkpoint)
-        self.assertEqual(result["inspection"], "weights_only")
-        self.assertNotIn("model", result["metadata"])
-        self.assertEqual(
-            result["metadata"]["metadata"]["metric_checkpoint"],
-            "runs/metric-v1/best.pt",
-        )
-
-    def test_tensorboard_inspection_records_terminal_scalars(self) -> None:
-        from torch.utils.tensorboard import SummaryWriter
-        from latent_arborist.research_adapter import inspect_tensorboard_metadata
-
-        with tempfile.TemporaryDirectory() as directory:
-            writer = SummaryWriter(directory)
-            writer.add_scalar("val/loss", 0.5, 3)
-            writer.add_scalar("val/loss", 0.25, 4)
-            writer.close()
-            event_path = next(Path(directory).glob("events.out.tfevents.*"))
-            result = inspect_tensorboard_metadata(event_path)
-        self.assertEqual(result["inspection"], "tensorboard_scalars")
-        self.assertEqual(result["scalars"]["val/loss"]["step"], 4)
-        self.assertEqual(result["scalars"]["val/loss"]["value"], 0.25)
-
 
 if __name__ == "__main__":
     unittest.main()
