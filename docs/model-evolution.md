@@ -28,6 +28,59 @@ makes repeated materialization stable without rewriting Git history.
 YAML front matter contains machine-validated state and references. Markdown
 contains the explanation. Git supplies authorship and change history.
 
+## Supported experiment lifecycle
+
+The preferred interface presents one experiment ID across planning, execution,
+conclusion, and inspection:
+
+```bash
+model-evolution experiment plan model-evolution/studies/<experiment-id>.md
+model-evolution experiment run <experiment-id>
+model-evolution experiment conclude <experiment-id>
+model-evolution experiment show <experiment-id>
+```
+
+The experiment ID is the definition's filename without `.md`. The definition
+uses the study Markdown format documented below and remains the canonical
+schema-v2 study record. Runs and modules are internal implementation and
+compatibility records; no new experiment record is written. `experiment run`
+creates an internal run attempt and executes it through the adapter selected by
+`.model-evolution/project.yaml`, so it has no `--adapter` option.
+
+The corresponding supported Python functions are imported from
+`model_evolution`:
+
+```python
+from model_evolution import (
+    conclude_experiment,
+    execute_experiment,
+    load_experiment,
+    plan_experiment,
+)
+
+planned = plan_experiment("model-evolution/studies/example.md")
+executed = execute_experiment(planned["id"])
+shown = load_experiment(planned["id"])
+concluded = conclude_experiment(planned["id"])
+```
+
+Each function accepts `root` as a keyword argument when the project is not
+discoverable from the current directory. Mutating functions also accept
+`actor` and `commit`; execution requires committed lifecycle records. The
+returned experiment view has this additive, read-time shape:
+
+```yaml
+kind: experiment
+id: <study-id>
+status: planned | active | concluded | cancelled
+definition: <complete schema-v2 study record>
+runs: [<complete associated schema-v2 run records>]
+```
+
+Existing `study`, `run`, schema-v2 record, and adapter interfaces remain
+supported. This interface does not migrate or rewrite existing research
+records.
+
 ## Study authoring
 
 Create the canonical file directly under `model-evolution/studies/`. Its

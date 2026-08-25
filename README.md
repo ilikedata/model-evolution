@@ -44,6 +44,19 @@ model-evolution validate
 model-evolution status
 ```
 
+The preferred lifecycle uses one experiment ID from planning through
+conclusion:
+
+```bash
+model-evolution experiment plan model-evolution/studies/<experiment-id>.md
+model-evolution experiment run <experiment-id>
+model-evolution experiment show <experiment-id>
+model-evolution experiment conclude <experiment-id>
+```
+
+The configured project adapter is used automatically. The existing `study`,
+`run`, and record-oriented interfaces remain available for compatibility.
+
 By default, lifecycle commands create narrowly scoped Git commits containing
 the records they change. Pass the global `--no-commit` option before the
 subcommand when a caller needs to manage commits itself.
@@ -106,12 +119,16 @@ The initial supported Python interface is exported from `model_evolution`:
 - `ModelEvolution`
 - `ProjectAdapter`
 - `ProjectConfig`
+- `conclude_experiment`
 - `download_tree`
+- `execute_experiment`
 - `initialize_project`
+- `load_experiment`
 - `load_record`
 - `load_project`
 - `new_id`
 - `now`
+- `plan_experiment`
 - `record_path`
 - `require_clean_source`
 - `require_committed_file`
@@ -120,9 +137,8 @@ The initial supported Python interface is exported from `model_evolution`:
 
 The CLI, schema-v2 record layout, and adapter entry-point group
 `model_evolution.adapters` are also compatibility surfaces. Other module paths
-remain provisional during the `0.x` series. The additional top-level helpers
-are the supported adapter SDK; projects should import them from
-`model_evolution`, not their implementation modules.
+remain provisional during the `0.x` series. Projects should import supported
+functions from `model_evolution`, not their implementation modules.
 
 See [the user guide](docs/model-evolution.md) and
 [schema-v2 design](docs/model-evolution-v2.md) for the complete lifecycle.
