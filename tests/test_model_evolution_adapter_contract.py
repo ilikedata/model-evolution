@@ -5,6 +5,7 @@ import io
 import unittest
 from unittest.mock import patch
 
+import model_evolution
 from model_evolution.adapters import load_adapter
 from model_evolution.cli import _parser
 
@@ -36,6 +37,19 @@ class _WrongNameAdapter:
 
 
 class AdapterContractTests(unittest.TestCase):
+    def test_public_api_exports_the_supported_library_contract(self) -> None:
+        self.assertEqual(
+            set(model_evolution.__all__),
+            {
+                "ModelEvolution",
+                "ProjectAdapter",
+                "ProjectConfig",
+                "initialize_project",
+                "load_project",
+                "new_id",
+            },
+        )
+
     def test_every_adapter_is_loaded_from_package_entry_points(self) -> None:
         with patch("model_evolution.adapters.entry_points", return_value=_EntryPoints([])):
             with self.assertRaisesRegex(ValueError, "unknown Model Evolution adapter"):
