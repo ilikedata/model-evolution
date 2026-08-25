@@ -155,7 +155,9 @@ skill for projects that use Model Evolution. It has two separate modes:
 
 The skill never executes experiments, training, evaluation, or dataset
 generation. It is maintained in this repository but is installed separately
-from the Python package.
+from the Python package. See the
+[experiment skill guide](docs/experiment-skill.md) for installation, usage,
+execution handoff, and stop conditions.
 
 ## Development
 

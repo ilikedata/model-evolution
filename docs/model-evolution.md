@@ -81,6 +81,11 @@ Existing `study`, `run`, schema-v2 record, and adapter interfaces remain
 supported. This interface does not migrate or rewrite existing research
 records.
 
+For agent-assisted research, the repository-owned
+[`manage-model-evolution-experiments`](experiment-skill.md) Codex skill can
+plan or conclude this lifecycle in separate invocations. The skill never
+executes experiments; execution remains an explicit repository-owner action.
+
 ## Study authoring
 
 Create the canonical file directly under `model-evolution/studies/`. Its
