@@ -4,6 +4,8 @@ All notable user-facing changes are documented here.
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-08-26
+
 ### Added
 
 - Preferred `experiment plan`, `experiment run`, `experiment conclude`, and
@@ -14,11 +16,6 @@ All notable user-facing changes are documented here.
   and uploads.
 - Repository-owned `manage-model-evolution-experiments` Codex skill for
   planning and concluding tracked experiments without executing them.
-
-## [0.1.0] - 2026-08-25
-
-### Added
-
 - Git-backed Markdown records for studies, datasets, runs, modules, and assessments.
 - Immutable local and Google Cloud Storage artifact management.
 - Schema-v2 validation, migration, lineage, status, and evidence workflows.
