@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
-authors = [{name = "Model Evolution contributors"}]
+authors = [{name = "Tai Elliott", email = "tai@machinelearning.com.au"}]
 keywords = ["machine-learning", "research", "provenance", "lineage", "experiments"]
 classifiers = [
     "Development Status :: 3 - Alpha",
