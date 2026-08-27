@@ -1,16 +1,86 @@
 # Model Evolution
 
-Model Evolution is a Git-backed research provenance and artifact-lineage tool
-for machine-learning projects. It keeps research intent human-readable in
-Markdown, validates references between studies, datasets, runs, modules, and
-assessments, and publishes immutable artifacts without embedding a particular
-training framework.
+Model Evolution keeps the reasoning behind a machine-learning model connected
+to the exact data, code, runs, and artifacts that produced it.
 
-Project-specific dataset generation, training, and artifact inspection are
-provided by installable adapters. The core package does not depend on PyTorch,
-TensorFlow, or a model implementation.
+You—or your coding agent—write the hypothesis, method, expected evidence, and
+falsification condition in Markdown. Your existing project code executes the
+experiment through a small adapter. Model Evolution records each attempt,
+validates its lineage, publishes immutable artifacts, and keeps the conclusion
+beside the original intent in Git.
+
+It is not a training framework or experiment dashboard. It adds a durable,
+inspectable research record around the tools you already use, without depending
+on PyTorch, TensorFlow, or a particular model implementation.
+
+## Why Model Evolution
+
+Model development rarely leaves behind one coherent account of what happened.
+The hypothesis may live in a conversation, the configuration in Git, metrics in
+a report, and weights in object storage. Even when all of those pieces survive,
+their relationships and the reasoning behind the final model are easy to lose.
+
+Model Evolution gives an experiment one stable identity from plan to
+conclusion:
+
+```text
+plan a claim -> execute one or more runs -> inspect evidence -> conclude
+     Git              project adapter           records          Git
+                              |
+                              v
+                     immutable artifacts
+```
+
+Git is authoritative for human-readable intent, reasoning, summaries, and
+lineage. The configured artifact store is authoritative for immutable datasets,
+weights, complete metrics, and reports. Checksums and typed references bind the
+two together.
+
+This makes it possible for a person or agent returning later to answer:
+
+- What claim was this model intended to test?
+- Which exact data, configuration, source revision, and parent modules did it
+  use?
+- How many execution attempts were made, and what happened in each?
+- Which evidence supported or rejected the claim?
+- Which outputs are safe to reuse in the next experiment?
+
+## How an experiment evolves
+
+An experiment has one public ID throughout its lifecycle. Its **study** record
+is the canonical definition and eventual conclusion; **run** records capture
+individual execution attempts. Datasets, modules, and assessments provide the
+typed lineage around them.
+
+| Record | What it captures |
+| --- | --- |
+| Study | Claim, method, expected evidence, falsification, and conclusion |
+| Dataset | Generator provenance and an immutable dataset artifact |
+| Run | Pinned inputs, primary results, artifacts, and anomalies for one attempt |
+| Module | Reusable weights and their compatibility contract |
+| Assessment | Later, additional, or independently versioned evaluation |
+
+The records are Markdown with machine-validated YAML front matter. Record kind
+comes from the directory, and record ID comes from the filename:
+
+```text
+model-evolution/
+├── studies/
+├── datasets/
+├── runs/
+├── modules/
+└── assessments/
+```
+
+Agents can help author and review experiment plans, inspect recorded evidence,
+and write conclusions. The repository-provided agent workflow keeps execution
+as an explicit owner action, so training, evaluation, dataset generation, and
+their costs are never triggered merely by asking an agent to manage the
+research record.
 
 ## Installation
+
+Model Evolution requires Python 3.12 or newer and a Git repository.
 
 ```bash
 python -m pip install model-evolution
@@ -23,12 +93,9 @@ store:
 python -m pip install "model-evolution[gcs]"
 ```
 
-Model Evolution requires Python 3.12 or newer and a Git repository.
-
 ## Quick start
 
-Initialize a Git repository and commit its initial files before initializing
-Model Evolution:
+Initialize and commit the repository before initializing Model Evolution:
 
 ```bash
 git init
@@ -39,12 +106,50 @@ model-evolution init \
   --project-id example \
   --artifact-store file:///absolute/path/to/artifacts \
   --adapter example
-
-model-evolution validate
-model-evolution status
 ```
 
-The preferred lifecycle uses one experiment ID from planning through
+The adapter name identifies project code that performs dataset generation,
+training, and artifact inspection. You register that adapter as described in
+[Connecting project code](#connecting-project-code); `example` is a placeholder,
+not a built-in trainer.
+
+You or your agent then create a study under
+`model-evolution/studies/<experiment-id>.md`. A planned study describes the
+claim before execution:
+
+```markdown
+---
+status: planned
+design:
+  dataset_id: <dataset-id>
+  config: configs/example.toml
+  inherited_modules: []
+---
+
+# Test a smaller learning rate
+
+## Claim
+
+Reducing the learning rate will improve held-out accuracy.
+
+## Basis
+
+The baseline run showed unstable validation loss near convergence.
+
+## Expected evidence
+
+Held-out accuracy exceeds the baseline by at least one percentage point.
+
+## Falsification
+
+Reject the claim if the improvement is smaller than one percentage point.
+
+## Method
+
+Repeat the baseline configuration with only the learning rate changed.
+```
+
+Use the same experiment ID through planning, execution, inspection, and
 conclusion:
 
 ```bash
@@ -54,18 +159,22 @@ model-evolution experiment show <experiment-id>
 model-evolution experiment conclude <experiment-id>
 ```
 
-The configured project adapter is used automatically. The existing `study`,
-`run`, and record-oriented interfaces remain available for compatibility.
+The configured project adapter is selected automatically. By default, lifecycle
+commands create narrowly scoped Git commits containing the records they change.
+Pass the global `--no-commit` option before the subcommand when another caller
+needs to manage commits itself. Experiment execution always requires committed
+lifecycle records.
 
-By default, lifecycle commands create narrowly scoped Git commits containing
-the records they change. Pass the global `--no-commit` option before the
-subcommand when a caller needs to manage commits itself.
+The project configuration lives at `.model-evolution/project.yaml`. Generated
+working state belongs under `.model-evolution/work/` and should be ignored by
+Git. Use these commands to check the registry at any time:
 
-The project configuration lives at `.model-evolution/project.yaml`. Canonical
-Markdown records live under `model-evolution/`; generated working state belongs
-under `.model-evolution/work/` and should be ignored by Git.
+```bash
+model-evolution validate
+model-evolution status
+```
 
-## Project adapters
+## Connecting project code
 
 An adapter connects the generic lifecycle to a project's dataset generator,
 trainer, and artifact formats:
@@ -114,7 +223,7 @@ loads adapters only when an adapter-backed command needs one.
 
 ## Supported interface
 
-The initial supported Python interface is exported from `model_evolution`:
+The supported Python interface is exported from `model_evolution`:
 
 - `ModelEvolution`
 - `ProjectAdapter`
@@ -140,22 +249,25 @@ The CLI, schema-v2 record layout, and adapter entry-point group
 remain provisional during the `0.x` series. Projects should import supported
 functions from `model_evolution`, not their implementation modules.
 
-See [the user guide](docs/model-evolution.md) and
-[schema-v2 design](docs/model-evolution-v2.md) for the complete lifecycle.
+The existing `study`, `run`, and record-oriented interfaces remain available
+for compatibility. See [the user guide](docs/model-evolution.md) and
+[schema-v2 design](docs/model-evolution-v2.md) for the complete lifecycle and
+record formats.
 
-## Codex experiment workflow
+## Agent-assisted workflow
 
 This repository includes the standalone
 [`manage-model-evolution-experiments`](skills/manage-model-evolution-experiments/SKILL.md)
-skill for projects that use Model Evolution. It has two separate modes:
+skill for coding agents working in projects that use Model Evolution. It has two
+separate modes:
 
 - plan one focused experiment and hand its exact execution command to the
   repository owner; or
 - conclude an experiment from evidence the owner has already produced.
 
 The skill never executes experiments, training, evaluation, or dataset
-generation. It is maintained in this repository but is installed separately
-from the Python package. See the
+generation. It is maintained in this repository but installed separately from
+the Python package. See the
 [experiment skill guide](docs/experiment-skill.md) for installation, usage,
 execution handoff, and stop conditions.
 
